@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.next/
+*.log
+.DS_Store
+config.json
+ditto.json
+.env
+.env.local
