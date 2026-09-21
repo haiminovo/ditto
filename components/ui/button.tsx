@@ -8,7 +8,7 @@ export function cn(...inputs: ClassValue[]) {
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: "primary" | "secondary" | "ghost" | "destructive";
-  size?: "sm" | "md" | "lg";
+  size?: "sm" | "md" | "lg" | "icon";
 }
 
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
@@ -28,6 +28,8 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
             "h-8 px-3 text-sm": size === "sm",
             "h-10 px-4 py-2": size === "md",
             "h-12 px-6 text-lg": size === "lg",
+            // 圆形图标按钮：36px，够得着（不靠 32px 的小目标），且不抢视觉
+            "h-9 w-9 rounded-full p-0": size === "icon",
           },
           className
         )}

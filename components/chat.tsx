@@ -22,6 +22,8 @@ import {
   Trash2,
   Pencil,
   Image as ImageIcon,
+  Loader2,
+  RefreshCw,
   X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -31,11 +33,12 @@ import {
   ProviderKey,
   getProviderName,
   getProviderBaseURL,
-  getProviderModels,
+  resolveProviderType,
   getDefaultRegistry,
   estimateMessagesTokens,
 } from "@/lib/sdk";
 import { cn } from "@/components/ui/button";
+import { useProviderModels } from "@/components/use-provider-models";
 
 interface ChatImage {
   id: string;
@@ -107,7 +110,9 @@ export function ChatPage() {
     newSessions.delete(id);
     setSessions(newSessions);
     if (currentSessionId === id) {
-      setCurrentSessionId(newSessions.keys().next().value);
+      // sessions.size > 1 已在上方保证，删除后至少还剩一个
+      const nextId = newSessions.keys().next().value;
+      if (nextId) setCurrentSessionId(nextId);
     }
   };
 
@@ -320,6 +325,10 @@ export function ChatPage() {
     }
   };
 
+  // 发送按钮的可用性和输入框的空状态，都和 handleSend 的守卫条件保持一致
+  const isComposerEmpty = !input.trim() && pendingImages.length === 0;
+  const canSend = !isComposerEmpty && !isStreaming;
+
   return (
     <div className="flex h-screen bg-gray-50 dark:bg-gray-950">
       <div className="w-64 bg-white dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800 flex flex-col">
@@ -334,7 +343,7 @@ export function ChatPage() {
           </Button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-2">
+        <div className="flex flex-col gap-2 flex-1 overflow-y-auto px-2">
           {Array.from(sessions.values())
             .sort((a, b) => b.createdAt - a.createdAt)
             .map((session) => (
@@ -390,13 +399,31 @@ export function ChatPage() {
                 const registry = getDefaultRegistry();
                 const modelEntry = currentModel ? registry.resolve(currentModel.model) : null;
                 const estimatedTokens = Math.max(0, estimateMessagesTokens(currentSession.messages));
-                const maxContext = modelEntry?.contextWindow ?? 128000;
+
+                // 上下文窗口只有 Anthropic 的 /v1/models 会给（max_input_tokens），
+                // OpenAI 兼容接口只返回 id。查不到时**如实说不确定**，不编一个数 ——
+                // 曾经这里用 `?? 128000` 顶上：一个凭空的窗口会让人以为还有余量，
+                // 比不显示更危险。没有窗口就没有分母，进度条也就没有意义。
+                if (!modelEntry) {
+                  return (
+                    <div className="text-right">
+                      <div className="text-xs text-gray-500 dark:text-gray-400">
+                        ~{estimatedTokens.toLocaleString()} tokens
+                      </div>
+                      <div className="text-[11px] text-gray-400 dark:text-gray-500">
+                        上下文窗口未知
+                      </div>
+                    </div>
+                  );
+                }
+
+                const maxContext = modelEntry.contextWindow;
                 const usagePercent = Math.max(0, Math.min((estimatedTokens / maxContext) * 100, 100));
 
                 return (
                   <div className="text-right">
                     <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">
-                      ~{Math.max(0, estimatedTokens).toLocaleString()} / {maxContext.toLocaleString()} tokens
+                      ~{estimatedTokens.toLocaleString()} / {maxContext.toLocaleString()} tokens
                     </div>
                     <div className="w-32 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
                       <div
@@ -493,21 +520,29 @@ export function ChatPage() {
           </div>
         </div>
 
-        <div className="border-t border-gray-200 dark:border-gray-800 p-4">
+        <div className="border-t border-gray-200 dark:border-gray-800 px-4 pt-3 pb-2">
           <div className="max-w-3xl mx-auto">
             {/* 待上传图片预览 */}
             {pendingImages.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-2">
                 {pendingImages.map((img) => (
-                  <div key={img.id} className="relative">
+                  <div key={img.id} className="group relative">
                     <img
                       src={img.url}
-                      alt="Pending upload"
-                      className="h-20 w-20 object-cover rounded"
+                      alt="待发送的图片"
+                      className="h-20 w-20 object-cover rounded-lg border border-gray-200 dark:border-gray-700"
                     />
+                    {/* 常驻可见，不做 hover 才显示 —— 触屏没有 hover，
+                        那样会让移除按钮在手机上直接消失 */}
                     <button
                       onClick={() => removePendingImage(img.id)}
-                      className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-0.5"
+                      aria-label="移除这张图片"
+                      className={cn(
+                        "absolute -top-1.5 -right-1.5 rounded-full p-1",
+                        "bg-gray-900/70 text-white backdrop-blur-sm",
+                        "hover:bg-red-600 focus-visible:bg-red-600 focus-visible:outline-none",
+                        "transition-colors duration-150"
+                      )}
                     >
                       <X className="w-3 h-3" />
                     </button>
@@ -515,7 +550,19 @@ export function ChatPage() {
                 ))}
               </div>
             )}
-            <div className="relative">
+
+            {/* 整个容器作为一个视觉平面：聚焦时整体高亮，而不是只给 textarea 描边。
+                textarea 自身的边框与焦点环都已被抹平（见下方 className）。 */}
+            <div
+              className={cn(
+                "rounded-2xl border bg-white dark:bg-gray-900",
+                "border-gray-200 dark:border-gray-800 shadow-sm",
+                "transition-[border-color,box-shadow] duration-200",
+                "focus-within:border-blue-400 dark:focus-within:border-blue-500",
+                "focus-within:shadow-md focus-within:ring-4 focus-within:ring-blue-500/10",
+                isStreaming && "opacity-70"
+              )}
+            >
               <Textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -536,9 +583,17 @@ export function ChatPage() {
                     }
                   }
                 }}
-                placeholder="输入消息或粘贴图片... (Enter 发送, Shift+Enter 换行)"
-                className="resize-none pl-12 pr-12 min-h-[60px] max-h-[200px]"
+                placeholder="输入消息，或直接粘贴图片…"
                 rows={1}
+                className={cn(
+                  "resize-none border-0 bg-transparent shadow-none",
+                  "px-4 pt-3.5 pb-1 min-h-[52px] max-h-[200px]",
+                  "text-[15px] leading-relaxed",
+                  "placeholder:text-gray-400 dark:placeholder:text-gray-500",
+                  // 抹平 Textarea 自带的边框与焦点环，交由外层容器统一表达
+                  "focus:ring-0 focus:ring-offset-0",
+                  "focus-visible:ring-0 focus-visible:ring-offset-0"
+                )}
               />
               <input
                 ref={fileInputRef}
@@ -548,23 +603,52 @@ export function ChatPage() {
                 className="hidden"
                 onChange={handleImageSelect}
               />
-              <Button
-                variant="ghost"
-                size="sm"
-                className="absolute left-2 bottom-2"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isStreaming}
-              >
-                <ImageIcon className="w-4 h-4" />
-              </Button>
-              <Button
-                className="absolute right-2 bottom-2"
-                size="sm"
-                onClick={handleSend}
-                disabled={(!input.trim() && pendingImages.length === 0) || isStreaming}
-              >
-                <Send className="w-4 h-4" />
-              </Button>
+
+              <div className="flex items-center justify-between gap-2 px-2 pb-2">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="添加图片"
+                  className="text-gray-500 dark:text-gray-400"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isStreaming}
+                >
+                  <ImageIcon className="w-[18px] h-[18px]" />
+                </Button>
+
+                <Button
+                  size="icon"
+                  aria-label="发送"
+                  className={cn(
+                    "transition-all duration-150 active:scale-95",
+                    canSend
+                      ? "bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
+                      : // 明确的禁用态配色，而不是单纯降透明度 —— 后者会让人
+                      // 分不清「不能用」和「没加载出来」
+                      "bg-gray-100 text-gray-400 dark:bg-gray-800 dark:text-gray-600 cursor-not-allowed"
+                  )}
+                  onClick={handleSend}
+                  disabled={!canSend}
+                >
+                  {isStreaming ? (
+                    <Loader2 className="w-[18px] h-[18px] animate-spin" />
+                  ) : (
+                    <Send className="w-[18px] h-[18px]" />
+                  )}
+                </Button>
+              </div>
+            </div>
+
+            {/* 快捷键提示：只在输入为空时可见。用 opacity 切换而不是条件渲染，
+                避免出现/消失时把下方内容顶得上下跳。 */}
+            <div
+              className={cn(
+                "mt-1.5 text-center text-[11px] text-gray-400 dark:text-gray-600",
+                "transition-opacity duration-200",
+                isComposerEmpty ? "opacity-100" : "opacity-0"
+              )}
+            >
+              Enter 发送 · Shift+Enter 换行 · 可直接粘贴图片
             </div>
           </div>
         </div>
@@ -599,7 +683,9 @@ function SettingsModal({
   deleteProvider: (key: string) => Promise<void>;
   isConfigured: boolean;
 }) {
-  const [activeTab, setActiveTab] = useState<"providers" | "models">("providers");
+  // 只保留 providers。曾有一个 "models" 成员，但从来没有渲染过对应 UI ——
+  // 留着会让人以为存在一个模型管理页。
+  const [activeTab, setActiveTab] = useState<"providers">("providers");
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
   const [addProviderOpen, setAddProviderOpen] = useState(false);
 
@@ -815,11 +901,33 @@ function EditProviderForm({
   const [name, setName] = useState(existingConfig.name || "");
   const [apiKey, setApiKey] = useState(existingConfig.apiKey || "");
   const [baseURL, setBaseURL] = useState(existingConfig.baseURL || getProviderBaseURL(providerKey, config));
-  const [models, setModels] = useState<string[]>(existingConfig.models || getProviderModels(providerKey, config));
+  // 已保存的列表就是权威 —— 下面拉到的模型**不会**自动覆盖它
+  const [models, setModels] = useState<string[]>(existingConfig.models || []);
   const [modelInput, setModelInput] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
+  const [dirty, setDirty] = useState(false);
+
+  const fetched = useProviderModels({
+    provider: providerKey,
+    providerType: existingConfig.type || resolveProviderType(providerKey, existingConfig),
+    baseURL,
+    apiKey,
+    savedModels: models,
+    enabled: true,
+  });
+
+  // 只有在用户从未保存过列表时才自动灌入；否则把接口结果留在下方的只读区块里，
+  // 由用户自己决定要不要采纳。静默替换一份手工编过的列表是数据丢失。
+  useEffect(() => {
+    if (dirty) return;
+    const ids = fetched.available;
+    if (ids.length === 0) return;
+    setModels((prev) => (prev.length === 0 ? ids : prev));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetched.available, dirty]);
 
   const addModel = () => {
+    setDirty(true);
     if (modelInput.trim() && !models.includes(modelInput.trim())) {
       setModels([...models, modelInput.trim()]);
       setModelInput("");
@@ -859,10 +967,91 @@ function EditProviderForm({
       </div>
 
       <div>
-        <label className="block text-sm font-medium mb-2">
-          模型列表
-          <span className="text-gray-400 font-normal ml-1">（每行一个）</span>
-        </label>
+        <div className="flex items-center justify-between mb-2">
+          <label className="block text-sm font-medium">
+            模型列表
+            <span className="text-gray-400 font-normal ml-1">
+              （保存的就是这一份）
+            </span>
+          </label>
+          <button
+            type="button"
+            onClick={fetched.refresh}
+            disabled={fetched.loading || !apiKey.trim() || !baseURL.trim()}
+            className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
+          >
+            {fetched.loading ? (
+              <>
+                <Loader2 className="w-3 h-3 animate-spin" /> 获取中…
+              </>
+            ) : (
+              <>
+                <RefreshCw className="w-3 h-3" /> 获取模型列表
+              </>
+            )}
+          </button>
+        </div>
+
+        {fetched.error && (
+          <p className="text-xs text-amber-600 dark:text-amber-400 mb-2">
+            未能获取模型列表：{fetched.error}
+          </p>
+        )}
+        {fetched.warnings.map((w, i) => (
+          <p key={i} className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+            {w}
+          </p>
+        ))}
+
+        {/* provider 返回的模型单独一块，**不覆盖**上面的已保存列表。
+            静默替换一份用户手工编过的列表是数据丢失，而且会把 OpenAI 那
+            ~60 个 id 一股脑写进 localStorage。要采纳得用户自己点。 */}
+        {fetched.fetched && fetched.fetched.length > 0 && (
+          <div className="mb-3 rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 p-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                Provider 返回 {fetched.fetched.length} 个模型（未自动采纳）
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setDirty(true);
+                  setModels(fetched.available);
+                }}
+                className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                全部替换为返回结果
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
+              {fetched.fetched.map((m) => {
+                const already = models.includes(m.id);
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    disabled={already}
+                    title={m.contextWindow ? `上下文 ${m.contextWindow.toLocaleString()} tokens` : undefined}
+                    onClick={() => {
+                      setDirty(true);
+                      setModels((prev) => (prev.includes(m.id) ? prev : [...prev, m.id]));
+                    }}
+                    className={cn(
+                      "px-2 py-0.5 rounded-full text-xs border transition-colors",
+                      already
+                        ? "border-transparent bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-default"
+                        : "border-gray-300 dark:border-gray-600 hover:border-blue-500 hover:text-blue-600 dark:hover:text-blue-400"
+                    )}
+                  >
+                    {already ? "✓ " : "+ "}
+                    {m.id}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <div className="space-y-2">
           <div className="flex gap-2">
             <Input
@@ -959,9 +1148,32 @@ function AddProviderModal({
   const [models, setModels] = useState<string[]>([]);
   const [modelInput, setModelInput] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
+  const [dirty, setDirty] = useState(false);
+
+  // ⚠️ hook 必须在这个组件顶层无条件调用 —— 下面有 `if (step === "select") return`，
+  // 一旦把 hook 放到那个 return 之后就会破坏 hooks 调用顺序。
+  const fetched = useProviderModels({
+    provider: selectedProvider ?? "",
+    providerType,
+    baseURL,
+    apiKey,
+    enabled: step === "config" && !!selectedProvider,
+  });
+
+  // 拉到了就填进空列表并自动选中第一个 —— 否则「添加」按钮门禁在 !selectedModel 上，
+  // 拉取成功了按钮还是灰的，用户得自己去下拉框里挑一次。
+  useEffect(() => {
+    if (step !== "config" || dirty) return;
+    const ids = fetched.available;
+    if (ids.length === 0) return;
+    setModels((prev) => (prev.length === 0 ? ids : prev));
+    setSelectedModel((prev) => prev || ids[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetched.available, dirty, step]);
 
   const handleSelectProvider = (provider: ProviderKey | "custom") => {
     setSelectedProvider(provider);
+    setDirty(false);
     if (provider === "custom") {
       setProviderName("");
       setBaseURL("");
@@ -971,8 +1183,9 @@ function AddProviderModal({
     } else {
       setProviderName(PROVIDERS[provider].name);
       setBaseURL(PROVIDERS[provider].baseURL);
-      setModels([...PROVIDERS[provider].models]);
-      setSelectedModel(PROVIDERS[provider].models[0]);
+      // 模型列表不再来自预设 —— 填完 key 后由 useProviderModels 自动拉取
+      setModels([]);
+      setSelectedModel("");
       setProviderType(PROVIDERS[provider].type as any);
     }
     setStep("config");
@@ -1011,7 +1224,7 @@ function AddProviderModal({
                   >
                     <div className="font-medium">{provider.name}</div>
                     <div className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                      {key === "custom" ? "完全自定义配置" : `${provider.models.length} 个预设模型`}
+                      {key === "custom" ? "完全自定义配置" : "填完 API Key 后自动获取模型列表"}
                     </div>
                   </button>
                 )
@@ -1082,10 +1295,44 @@ function AddProviderModal({
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-2">
-              模型列表
-              <span className="text-gray-400 font-normal ml-1">（每行一个）</span>
-            </label>
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-sm font-medium">
+                模型列表
+                {fetched.source === "fetched" && (
+                  <span className="text-gray-400 font-normal ml-1">
+                    （已从接口获取 {fetched.available.length} 个）
+                  </span>
+                )}
+              </label>
+              <button
+                type="button"
+                onClick={fetched.refresh}
+                disabled={fetched.loading || !apiKey.trim() || !baseURL.trim()}
+                className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
+              >
+                {fetched.loading ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin" /> 获取中…
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-3 h-3" /> 获取模型列表
+                  </>
+                )}
+              </button>
+            </div>
+
+            {fetched.error && (
+              <p className="text-xs text-amber-600 dark:text-amber-400 mb-2">
+                未能获取模型列表：{fetched.error}
+              </p>
+            )}
+            {fetched.warnings.map((w, i) => (
+              <p key={i} className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+                {w}
+              </p>
+            ))}
+
             <div className="space-y-2">
               <div className="flex gap-2">
                 <Input

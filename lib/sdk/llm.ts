@@ -12,7 +12,8 @@ import {
   LLMResponse,
   Message,
   ProviderConfig,
-  PROVIDERS,
+  resolveBaseURL,
+  resolveProviderType,
 } from "./types";
 import { getDefaultRegistry } from "./registry";
 import {
@@ -166,16 +167,9 @@ export function createModelFromConfig(
     return new BrowserModel(providerKey, modelName, providerConfig);
   }
 
-  // 优先使用配置中的 type，如果没有则用 providerKey 匹配预定义 provider，最后默认为 openai
-  let providerType = providerConfig.type;
-  if (!providerType) {
-    const predefined = (PROVIDERS as any)[providerKey];
-    if (predefined?.type) {
-      providerType = predefined.type;
-    } else {
-      providerType = providerKey;
-    }
-  }
+  // 解析逻辑统一在 types.ts。这里原有一份 switch，server.ts 与 types.ts 各有一份 ——
+  // 三份一旦解析出不同的 baseURL，就会出现「列模型用 A 协议、聊天用 B 协议」。
+  const providerType = resolveProviderType(providerKey, providerConfig);
 
   if (providerType === "anthropic") {
     return new AnthropicModel(
@@ -187,28 +181,7 @@ export function createModelFromConfig(
     );
   }
 
-  let baseURL = providerConfig.baseURL;
-  if (!baseURL) {
-    switch (providerType) {
-      case "openai":
-        baseURL = "https://api.openai.com/v1";
-        break;
-      case "openrouter":
-        baseURL = "https://openrouter.ai/api/v1";
-        break;
-      case "deepseek":
-        baseURL = "https://api.deepseek.com/v1";
-        break;
-      case "qwen":
-        baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
-        break;
-      case "ollama":
-        baseURL = "http://localhost:11434/v1";
-        break;
-      default:
-        baseURL = "https://api.openai.com/v1";
-    }
-  }
+  const baseURL = resolveBaseURL(providerKey, providerConfig);
 
   return new OpenAICompatibleModel(
     providerKey,

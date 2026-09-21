@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useApp } from "@/app/providers";
 import {
   Card,
@@ -16,7 +16,8 @@ import {
   ProviderKey,
   getProviderName,
 } from "@/lib/sdk";
-import { ArrowLeft, Check, Settings, Plus, Trash2, Eye, EyeOff } from "lucide-react";
+import { useProviderModels } from "@/components/use-provider-models";
+import { ArrowLeft, Check, Loader2, RefreshCw, Settings, Plus, Trash2, Eye, EyeOff } from "lucide-react";
 
 export function SetupPage() {
   const [step, setStep] = useState<"welcome" | "provider" | "config" | "success">("welcome");
@@ -30,7 +31,18 @@ export function SetupPage() {
   const [modelInput, setModelInput] = useState("");
   const [providerType, setProviderType] = useState<"anthropic" | "openai">("openai");
   const [isSaving, setIsSaving] = useState(false);
+  /** 用户是否手动动过模型列表 —— 动过就不再自动接管 */
+  const [dirty, setDirty] = useState(false);
   const { saveConfig, config } = useApp();
+
+  // 必须在顶层无条件调用，用 enabled 控制是否真的发请求
+  const fetched = useProviderModels({
+    provider: selectedProvider ?? "",
+    providerType,
+    baseURL,
+    apiKey,
+    enabled: step === "config" && !!selectedProvider,
+  });
 
   const handleProviderSelect = (provider: ProviderKey | "custom") => {
     setSelectedProvider(provider);
@@ -43,14 +55,29 @@ export function SetupPage() {
     } else {
       setProviderName(PROVIDERS[provider].name);
       setBaseURL(PROVIDERS[provider].baseURL);
-      setModels([...PROVIDERS[provider].models]);
-      setSelectedModel(PROVIDERS[provider].models[0]);
+      // 模型列表不再来自预设 —— 填完 key 后由 useProviderModels 自动拉取
+      setModels([]);
+      setSelectedModel("");
       setProviderType(PROVIDERS[provider].type as any);
     }
+    setDirty(false);
     setStep("config");
   };
 
+  // 拉取成功后接管空列表。只在用户没手动动过、且列表仍为空时生效 ——
+  // 否则会把用户已经编好的列表冲掉。
+  useEffect(() => {
+    if (step !== "config" || dirty) return;
+    const ids = fetched.available;
+    if (ids.length === 0) return;
+
+    setModels((prev) => (prev.length === 0 ? ids : prev));
+    setSelectedModel((prev) => prev || ids[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetched.available, dirty, step]);
+
   const addModel = () => {
+    setDirty(true);
     if (modelInput.trim() && !models.includes(modelInput.trim())) {
       setModels([...models, modelInput.trim()]);
       if (models.length === 0) {
@@ -61,6 +88,7 @@ export function SetupPage() {
   };
 
   const removeModel = (model: string) => {
+    setDirty(true);
     const newModels = models.filter((m) => m !== model);
     setModels(newModels);
     if (selectedModel === model) {
@@ -157,7 +185,7 @@ export function SetupPage() {
                     >
                       <div className="font-medium">{provider.name}</div>
                       <div className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                        {key === "custom" ? "自定义配置" : `${provider.models.length} 个可用模型`}
+                        {key === "custom" ? "完全自定义配置" : "填完 API Key 后自动获取模型列表"}
                       </div>
                     </button>
                   )
@@ -240,10 +268,49 @@ export function SetupPage() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium mb-2">
-                  模型列表
-                  <span className="text-gray-400 font-normal ml-1">（每行一个）</span>
-                </label>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-sm font-medium">
+                    模型列表
+                    {fetched.source === "fetched" && (
+                      <span className="text-gray-400 font-normal ml-1">
+                        （已从接口获取 {fetched.available.length} 个）
+                      </span>
+                    )}
+                    {fetched.source === "saved" && (
+                      <span className="text-gray-400 font-normal ml-1">（已保存的列表）</span>
+                    )}
+                  </label>
+                  <button
+                    type="button"
+                    onClick={fetched.refresh}
+                    disabled={fetched.loading || !apiKey.trim() || !baseURL.trim()}
+                    className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
+                  >
+                    {fetched.loading ? (
+                      <>
+                        <Loader2 className="w-3 h-3 animate-spin" /> 获取中…
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="w-3 h-3" /> 获取模型列表
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* 拉取失败不阻断 —— 手填照常可用。防火墙内或网关不支持
+                    /models 的用户必须仍然能配置。 */}
+                {fetched.error && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400 mb-2">
+                    未能获取模型列表：{fetched.error}
+                  </p>
+                )}
+                {fetched.warnings.map((w, i) => (
+                  <p key={i} className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+                    {w}
+                  </p>
+                ))}
+
                 <div className="space-y-2">
                   <div className="flex gap-2">
                     <Input

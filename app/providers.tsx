@@ -5,6 +5,7 @@ import {
   Config,
   createDefaultConfig,
   isValidConfig,
+  migrateConfig,
   Message,
   ModelSet,
 } from "@/lib/sdk";
@@ -34,8 +35,17 @@ export function Providers({ children }: { children: React.ReactNode }) {
       try {
         const stored = localStorage.getItem("ditto:config");
         if (stored) {
-          const parsed = JSON.parse(stored);
-          setConfig(parsed);
+          const parsed = JSON.parse(stored) as Config;
+          // openrouter / qwen / ollama 三个预设已删除。旧配置里指向它们的条目
+          // 若不走这一步，会命中 resolveBaseURL 的默认分支落到 api.openai.com，
+          // 拿第三方网关的 key 去打 OpenAI —— 静默错路由。
+          const migrated = migrateConfig(parsed);
+          setConfig(migrated);
+
+          // 立即写回，否则每次重载都要重跑一遍
+          if (migrated !== parsed) {
+            localStorage.setItem("ditto:config", JSON.stringify(migrated));
+          }
         }
       } catch (e) {
         console.error("Failed to load config:", e);
@@ -96,10 +106,18 @@ export function Providers({ children }: { children: React.ReactNode }) {
     // If deleted provider was default, switch to another
     if (config.provider === providerKey) {
       const remaining = Object.keys(newProviders).filter(k => newProviders[k].apiKey);
-      if (remaining.length > 0) {
+      // 必须挑一个**已有模型**的接任者。否则 modelName 会是空串，
+      // isValidConfig 立刻变假，一个配置齐全的用户会被直接打回配置向导。
+      const withModel = remaining.find(k => (newProviders[k].models?.[0] ?? "") !== "");
+
+      if (withModel) {
+        newConfig.provider = withModel;
+        newConfig.modelName = newProviders[withModel].models![0];
+      } else if (remaining.length > 0) {
+        // 有 key 但都没模型（模型列表现在要拉取才知道）：先切过去，
+        // 让用户去设置里补一个，而不是把他扔回配置向导
         newConfig.provider = remaining[0];
-        const firstProvider = newProviders[remaining[0]];
-        newConfig.modelName = firstProvider.models?.[0] || "";
+        newConfig.modelName = "";
       } else {
         newConfig.provider = "";
         newConfig.modelName = "";

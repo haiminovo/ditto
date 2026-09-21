@@ -60,66 +60,12 @@ const models: ModelEntry[] = [
     outputCostPer1M: 0.6,
   },
   {
-    provider: "openrouter",
-    id: "anthropic/claude-3-7-sonnet",
-    name: "Claude 3.7 Sonnet",
-    contextWindow: 200000,
-    maxTokens: 8192,
-    inputCostPer1M: 3.0,
-    outputCostPer1M: 15.0,
-  },
-  {
-    provider: "openrouter",
-    id: "openai/gpt-4o",
-    name: "GPT-4o",
-    contextWindow: 128000,
-    maxTokens: 4096,
-    inputCostPer1M: 5.0,
-    outputCostPer1M: 15.0,
-  },
-  {
-    provider: "openrouter",
-    id: "google/gemini-2-5-pro",
-    name: "Gemini 2.5 Pro",
-    contextWindow: 128000,
-    maxTokens: 8192,
-    inputCostPer1M: 1.25,
-    outputCostPer1M: 2.5,
-  },
-  {
     provider: "deepseek",
     id: "deepseek-chat",
     name: "DeepSeek Chat",
     contextWindow: 128000,
     maxTokens: 8192,
     inputCostPer1M: 0.14,
-    outputCostPer1M: 0.28,
-  },
-  {
-    provider: "qwen",
-    id: "qwen-plus",
-    name: "Qwen Plus",
-    contextWindow: 128000,
-    maxTokens: 2048,
-    inputCostPer1M: 0.08,
-    outputCostPer1M: 0.02,
-  },
-  {
-    provider: "qwen",
-    id: "qwen-turbo",
-    name: "Qwen Turbo",
-    contextWindow: 128000,
-    maxTokens: 2048,
-    inputCostPer1M: 0.08,
-    outputCostPer1M: 0.02,
-  },
-  {
-    provider: "qwen",
-    id: "qwen-max",
-    name: "Qwen Max",
-    contextWindow: 128000,
-    maxTokens: 2048,
-    inputCostPer1M: 1.12,
     outputCostPer1M: 0.28,
   },
 ];
@@ -266,6 +212,44 @@ export class ModelRegistry {
     }
 
     return best;
+  }
+
+  /**
+   * 把从 provider 接口发现的模型元数据并进来。
+   *
+   * ⚠️ 作用范围要认清：`getDefaultRegistry()` 是**模块级单例**，
+   * 浏览器 bundle 里的实例与 API route 里的实例是两个不同的对象。
+   * 所以这里注册的条目只修得好**浏览器端**的上下文计量条；
+   * 服务端做消息裁剪时用的仍是静态表。
+   *
+   * 本期只做展示，不把元数据持久化 —— 要让服务端也用上，
+   * 得改 ChatRequest 的契约把元数据带过去，那是另一个改动。
+   *
+   * 目前只有 Anthropic 的 /v1/models 会给 max_input_tokens / max_tokens；
+   * OpenAI 兼容接口只给 id，那些模型在表里查不到，计量条会显示「窗口未知」。
+   */
+  register(providerKey: string, entries: Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number }>): number {
+    let added = 0;
+
+    for (const e of entries) {
+      // 表里已经有的不动 —— 静态表是人工校准过的，优先于接口的粗粒度值
+      if (this.lookupModel("", e.id)) continue;
+      if (e.contextWindow === undefined && e.maxTokens === undefined) continue;
+
+      this.models.push({
+        provider: providerKey,
+        id: e.id,
+        name: e.name || e.id,
+        contextWindow: e.contextWindow ?? 128000,
+        maxTokens: e.maxTokens ?? 4096,
+        // 定价无处可得 —— 没有任何接口暴露它。留 0 表示未知。
+        inputCostPer1M: 0,
+        outputCostPer1M: 0,
+      });
+      added += 1;
+    }
+
+    return added;
   }
 
   list(filter?: string): ModelEntry[] {
