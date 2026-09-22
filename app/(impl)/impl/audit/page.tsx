@@ -14,6 +14,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { ACTOR_TYPE_LABELS, VIA_LABELS } from "@/lib/core/actors";
 import { resolveWorkspaceRoot, workspacePaths } from "@/lib/core/store/paths";
 import { queryAudit, verifyAudit } from "@/lib/core/store/audit";
 
@@ -130,7 +131,7 @@ export default async function AuditPage() {
                     <TableCell className="text-xs">
                       {e.actor.name}
                       <span className="text-gray-400">
-                        （{e.actor.type} · {e.actor.via}）
+                        （{ACTOR_TYPE_LABELS[e.actor.type]} · {VIA_LABELS[e.actor.via]}）
                       </span>
                     </TableCell>
                     <TableCell className="text-xs">

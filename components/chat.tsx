@@ -1,9 +1,11 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import Link from "next/link";
 import { useApp } from "@/app/providers";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Card,
@@ -13,6 +15,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  LayoutDashboard,
   MessageSquare,
   Plus,
   Settings,
@@ -38,6 +41,7 @@ import {
   estimateMessagesTokens,
 } from "@/lib/sdk";
 import { cn } from "@/components/ui/button";
+import { ToolCallCard, type UiToolCall } from "@/components/tool-call-card";
 import { useProviderModels } from "@/components/use-provider-models";
 
 interface ChatImage {
@@ -51,6 +55,8 @@ interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   images?: ChatImage[];
+  /** 这一轮助手调用了哪些实施平台工具 */
+  toolCalls?: UiToolCall[];
   isStreaming?: boolean;
 }
 
@@ -59,6 +65,62 @@ interface ChatSession {
   title: string;
   messages: ChatMessage[];
   createdAt: number;
+}
+
+/**
+ * 界面消息 → 发给模型的归一化消息。
+ *
+ * 两处要用：真正发送时，以及头部那个 token 计量条 —— 计量条必须看到
+ * 和实际请求一样的形状，否则它算出来的数会系统性偏小。
+ *
+ * 助手消息的工具调用在界面上挂在同一条消息里，这里要展开成
+ * 「assistant(tool_calls) + 若干 tool 结果」：少了这一步，模型下一轮
+ * 就看不到自己刚才调过什么、拿到了什么。
+ */
+function toApiMessages(messages: ChatMessage[]): DittoMessage[] {
+  return messages.flatMap((m) => {
+    if (m.role === "assistant" && m.toolCalls?.length) {
+      // 只带**已经有结果**的调用：有 tool_use 却没有对应 tool_result
+      // 会被 provider 直接拒掉
+      const done = m.toolCalls.filter((tc) => tc.result !== undefined);
+
+      if (done.length === 0) {
+        return [{ role: "assistant" as const, content: m.content }];
+      }
+
+      const out: DittoMessage[] = [
+        {
+          role: "assistant",
+          content: m.content,
+          toolCalls: done.map((tc) => ({
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.argsJson,
+          })),
+        },
+      ];
+
+      for (const tc of done) {
+        out.push({ role: "tool", toolCallId: tc.id, content: tc.result! });
+      }
+
+      return out;
+    }
+
+    // 用户消息带图片时构建多模态内容
+    if (m.role === "user" && m.images && m.images.length > 0) {
+      const content: any[] = [];
+      if (m.content) {
+        content.push({ type: "text", text: m.content });
+      }
+      m.images.forEach((img) => {
+        content.push({ type: "image_url", image_url: { url: img.url } });
+      });
+      return [{ role: "user" as const, content }];
+    }
+
+    return [{ role: m.role, content: m.content }];
+  });
 }
 
 export function ChatPage() {
@@ -70,6 +132,9 @@ export function ChatPage() {
   const [pendingImages, setPendingImages] = useState<ChatImage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  // 实施平台工具开关。存独立的键，不进 ditto:config —— 那是 provider 配置，
+  // 有自己的结构版本与迁移逻辑，为这么一个开关动它不划算。
+  const [enableTools, setEnableTools] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { sendMessage, currentModel, config, saveConfig, updateProvider, deleteProvider, isConfigured } = useApp();
@@ -79,6 +144,18 @@ export function ChatPage() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [currentSession.messages]);
+
+  // 首屏之后才读 localStorage：直接在 useState 初值里读会让服务端渲染
+  // 与客户端首帧不一致（hydration mismatch）
+  useEffect(() => {
+    const stored = localStorage.getItem("ditto:chat-tools");
+    if (stored !== null) setEnableTools(stored === "1");
+  }, []);
+
+  const toggleTools = (next: boolean) => {
+    setEnableTools(next);
+    localStorage.setItem("ditto:chat-tools", next ? "1" : "0");
+  };
 
   const createNewSession = () => {
     const id = Date.now().toString();
@@ -229,27 +306,35 @@ export function ChatPage() {
     setIsStreaming(true);
 
     try {
-      const messagesForApi: DittoMessage[] = updatedMessages.map((m) => {
-        // 如果是用户消息且有图片，构建多模态内容
-        if (m.role === "user" && m.images && m.images.length > 0) {
-          const content: any[] = [];
-          if (m.content) {
-            content.push({ type: "text", text: m.content });
-          }
-          m.images.forEach(img => {
-            content.push({ type: "image_url", image_url: { url: img.url } });
-          });
-          return { role: m.role, content };
-        }
-        return { role: m.role, content: m.content };
-      });
+      const messagesForApi = toApiMessages(updatedMessages);
 
-      const { stream } = await sendMessage(messagesForApi, true);
+      const { stream } = await sendMessage(messagesForApi, true, {
+        enableTools,
+      });
 
       if (stream) {
         let fullContent = "";
+        // 就地累积，写回 state 时再拷一份 —— 每来一个 chunk 都深拷一遍
+        // 数组，在长回答上会变成明显的开销
+        const toolCalls: UiToolCall[] = [];
+
         for await (const chunk of stream) {
-          fullContent += chunk;
+          if (chunk.type === "text") {
+            fullContent += chunk.text;
+          } else if (chunk.type === "tool_call") {
+            toolCalls.push({
+              id: chunk.id,
+              name: chunk.name,
+              argsJson: chunk.argsJson,
+            });
+          } else if (chunk.type === "tool_result") {
+            const hit = toolCalls.find((tc) => tc.id === chunk.id);
+            if (hit) {
+              hit.result = chunk.result;
+              hit.isError = chunk.isError;
+            }
+          }
+
           // 获取最新状态更新
           updateSession(currentSessionId, (prevSessions) => {
             const currentSession = prevSessions.get(currentSessionId);
@@ -262,6 +347,7 @@ export function ChatPage() {
               newMessages[assistantMsgIndex] = {
                 ...newMessages[assistantMsgIndex],
                 content: fullContent,
+                toolCalls: toolCalls.length > 0 ? [...toolCalls] : undefined,
               };
             }
 
@@ -380,6 +466,18 @@ export function ChatPage() {
             <Settings className="w-4 h-4" />
             设置
           </Button>
+
+          <div className="my-2 border-t border-gray-200 dark:border-gray-800" />
+
+          {/* 与控制台的「返回对话」对称：跨应用跳转放最后，用分割线隔开。
+              样式对齐 ghost/md 按钮（Button 没有 asChild，只能手写）。 */}
+          <Link
+            href="/impl"
+            className="inline-flex h-10 w-full items-center justify-start gap-2 rounded-md px-4 py-2 font-medium text-gray-700 transition-colors hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
+          >
+            <LayoutDashboard className="w-4 h-4" />
+            实施控制台
+          </Link>
         </div>
       </div>
 
@@ -398,7 +496,10 @@ export function ChatPage() {
               {currentSession.messages.length > 0 && (() => {
                 const registry = getDefaultRegistry();
                 const modelEntry = currentModel ? registry.resolve(currentModel.model) : null;
-                const estimatedTokens = Math.max(0, estimateMessagesTokens(currentSession.messages));
+                const estimatedTokens = Math.max(
+                  0,
+                  estimateMessagesTokens(toApiMessages(currentSession.messages))
+                );
 
                 // 上下文窗口只有 Anthropic 的 /v1/models 会给（max_input_tokens），
                 // OpenAI 兼容接口只返回 id。查不到时**如实说不确定**，不编一个数 ——
@@ -500,6 +601,16 @@ export function ChatPage() {
                             ))}
                           </div>
                         )}
+                        {/* 工具卡片放在正文之前：一轮里模型可能先调工具、
+                            拿到结果再作答，而内容是一条拼接起来的字符串 ——
+                            卡片排在前面读起来才是「查了这些，然后这是答案」 */}
+                        {message.role === "assistant" && message.toolCalls?.length ? (
+                          <div className="mb-2">
+                            {message.toolCalls.map((call) => (
+                              <ToolCallCard key={call.id} call={call} />
+                            ))}
+                          </div>
+                        ) : null}
                         {message.role === "assistant" ? (
                           <div className="prose dark:prose-invert prose-sm max-w-none">
                             <ReactMarkdown>{message.content}</ReactMarkdown>
@@ -662,6 +773,8 @@ export function ChatPage() {
           updateProvider={updateProvider}
           deleteProvider={deleteProvider}
           isConfigured={isConfigured}
+          enableTools={enableTools}
+          onToggleTools={toggleTools}
         />
       )}
     </div>
@@ -675,6 +788,8 @@ function SettingsModal({
   updateProvider,
   deleteProvider,
   isConfigured,
+  enableTools,
+  onToggleTools,
 }: {
   onClose: () => void;
   config: any;
@@ -682,6 +797,8 @@ function SettingsModal({
   updateProvider: (key: string, config: any) => Promise<void>;
   deleteProvider: (key: string) => Promise<void>;
   isConfigured: boolean;
+  enableTools: boolean;
+  onToggleTools: (next: boolean) => void;
 }) {
   // 只保留 providers。曾有一个 "models" 成员，但从来没有渲染过对应 UI ——
   // 留着会让人以为存在一个模型管理页。
@@ -719,6 +836,30 @@ function SettingsModal({
         </div>
 
         <CardContent className="flex-1 overflow-y-auto pt-6">
+          {/* 实施平台工具开关。
+              没有为它单开一个 tab：那会重演「models tab 从来没渲染过 UI」
+              的老问题。这里就一个开关，占一行足够。 */}
+          <div className="mb-6 pb-6 border-b border-gray-200 dark:border-gray-800">
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={enableTools}
+                onChange={(e) => onToggleTools(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              />
+              <div>
+                <div className="text-sm font-medium">启用实施平台工具</div>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  允许模型在对话中查询项目、资产、规则与审计（只读，外加跑规则自检）。
+                  写操作与审批仍需到实施控制台执行。
+                </p>
+                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                  若你的网关不支持 <code className="font-mono">tools</code> 参数而报错，关掉它即可。
+                </p>
+              </div>
+            </label>
+          </div>
+
           {activeTab === "providers" && (
             <ProvidersTab
               config={config}
@@ -1091,18 +1232,12 @@ function EditProviderForm({
       {!isDefault && models.length > 0 && (
         <div>
           <label className="block text-sm font-medium mb-2">选择默认模型</label>
-          <select
+          <Select
             value={selectedModel}
-            onChange={(e) => setSelectedModel(e.target.value)}
-            className="flex h-10 w-full items-center justify-between rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-950 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <option value="">选择模型...</option>
-            {models.map((model) => (
-              <option key={model} value={model}>
-                {model}
-              </option>
-            ))}
-          </select>
+            onChange={setSelectedModel}
+            placeholder="选择模型..."
+            options={models.map((model) => ({ value: model, label: model }))}
+          />
         </div>
       )}
 
@@ -1261,14 +1396,14 @@ function AddProviderModal({
               </div>
               <div>
                 <label className="block text-sm font-medium mb-2">API 类型</label>
-                <select
+                <Select
                   value={providerType}
-                  onChange={(e) => setProviderType(e.target.value as "anthropic" | "openai")}
-                  className="flex h-10 w-full items-center justify-between rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-950 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <option value="openai">OpenAI 兼容模式</option>
-                  <option value="anthropic">Anthropic 原生模式</option>
-                </select>
+                  onChange={(v) => setProviderType(v as "anthropic" | "openai")}
+                  options={[
+                    { value: "openai", label: "OpenAI 兼容模式" },
+                    { value: "anthropic", label: "Anthropic 原生模式" },
+                  ]}
+                />
               </div>
             </>
           )}
@@ -1371,18 +1506,12 @@ function AddProviderModal({
 
           <div>
             <label className="block text-sm font-medium mb-2">选择默认模型</label>
-            <select
+            <Select
               value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-              className="flex h-10 w-full items-center justify-between rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-950 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {models.length === 0 && <option value="">请先添加模型</option>}
-              {models.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
+              onChange={setSelectedModel}
+              placeholder="请先添加模型"
+              options={models.map((model) => ({ value: model, label: model }))}
+            />
           </div>
 
           <div className="flex gap-2 justify-end pt-4">

@@ -6,8 +6,10 @@ import {
   createDefaultConfig,
   isValidConfig,
   migrateConfig,
+  LLMOptions,
   Message,
   ModelSet,
+  StreamChunk,
 } from "@/lib/sdk";
 
 interface AppContextType {
@@ -18,7 +20,11 @@ interface AppContextType {
   setDefaultProvider: (providerKey: string, modelName: string) => Promise<void>;
   deleteProvider: (providerKey: string) => Promise<void>;
   isLoading: boolean;
-  sendMessage: (messages: Message[], stream?: boolean) => Promise<{ content: string; stream?: AsyncIterable<string> }>;
+  sendMessage: (
+    messages: Message[],
+    stream?: boolean,
+    options?: LLMOptions
+  ) => Promise<{ content: string; stream?: AsyncIterable<StreamChunk> }>;
   currentModel: { provider: string; model: string } | null;
 }
 
@@ -127,7 +133,11 @@ export function Providers({ children }: { children: React.ReactNode }) {
     await saveConfig(newConfig);
   }, [config, saveConfig]);
 
-  const sendMessage = useCallback(async (messages: Message[], stream = true) => {
+  const sendMessage = useCallback(async (
+    messages: Message[],
+    stream = true,
+    options: LLMOptions = {}
+  ) => {
     if (!modelSet) {
       throw new Error("No model configured");
     }
@@ -135,6 +145,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
     if (stream) {
       const streamResponse = modelSet.default.generateStream(messages, {
         temperature: 0.7,
+        ...options,
       });
 
       return {
@@ -144,6 +155,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
     } else {
       const response = await modelSet.default.generate(messages, {
         temperature: 0.7,
+        ...options,
       });
 
       return {

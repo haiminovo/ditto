@@ -112,6 +112,16 @@ export function estimateMessagesTokens(messages: Message[]): number {
         total += estimateTokens(msg.content);
       }
     }
+
+    // assistant 的 tool_calls 也会原样发给模型（工具名 + 参数 JSON），
+    // 漏算它就会在工具用得多的时候低估输入量
+    if (msg?.role === "assistant" && msg.toolCalls?.length) {
+      for (const call of msg.toolCalls) {
+        total += estimateTokens(call.name) + estimateTokens(call.arguments);
+        total += 8; // id 与结构开销
+      }
+    }
+
     total += 4; // role 的开销
   }
   return Math.max(0, total);
@@ -125,9 +135,11 @@ export function estimateMessagesTokens(messages: Message[]): number {
 export function trimMessagesToContextWindow(
   messages: Message[],
   model: ModelEntry,
-  reserveForOutput: number = 1024
+  reserveForOutput: number = 1024,
+  /** 工具定义占掉的输入量；由调用方算出实际值传进来，不在这里猜 */
+  reserveForTools: number = 0
 ): Message[] {
-  const maxInputTokens = model.contextWindow - reserveForOutput;
+  const maxInputTokens = model.contextWindow - reserveForOutput - reserveForTools;
 
   // 先估算当前 tokens
   let estimatedTokens = estimateMessagesTokens(messages);
@@ -161,7 +173,37 @@ export function trimMessagesToContextWindow(
     }
   }
 
-  return result;
+  return repairToolPairing(result, systemMessages.length);
+}
+
+/**
+ * 丢掉裁剪切面留下的**孤立工具消息**。
+ *
+ * 倒着往前收消息时，工具结果（role:"tool"）比它对应的 assistant 更新，
+ * 所以会先被收进来。预算正好卡在两者之间时，留下的一对只剩后半截：
+ *
+ *   [{role:"assistant", content:"…"}          ← 被丢掉了
+ *    {role:"tool", toolCallId:"call_1", …}]   ← 留下了，但它没有对应的 tool_use
+ *
+ * provider 会直接 400，而错误信息通常只说「tool_result 没有对应的
+ * tool_use」，看不出根因是裁剪。所以在发出去之前在这里补齐。
+ *
+ * **只需要处理开头**：tool 结果永远紧跟在自己的 assistant 之后，而
+ * 我们保留的是一段**后缀** —— 所以「assistant 被留下、它的结果被丢掉」
+ * 这种配对是发生不了的（结果更新，只会更早被收进来）。
+ * 反过来说，若在这里顺手把「带 toolCalls 的 assistant」也丢掉，
+ * 反而会砍掉一对完好的配对，正好造成这里想避免的那个错误。
+ */
+function repairToolPairing(messages: Message[], systemCount: number): Message[] {
+  const tail = messages.slice(systemCount);
+
+  let start = 0;
+  while (start < tail.length && tail[start].role === "tool") {
+    start += 1;
+  }
+
+  if (start === 0) return messages;
+  return [...messages.slice(0, systemCount), ...tail.slice(start)];
 }
 
 export class ModelRegistry {

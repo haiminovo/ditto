@@ -6,8 +6,9 @@
 端到端驱动「建项目 → 渲染资产 → 跑规则 → 整改 → 提交审批 → 放行 → 导出交付物」；
 人通过 Web 控制台看到同一份数据与同一套闸门。
 
-> 仓库里原有的多 Provider LLM 聊天客户端（`lib/sdk/` + `components/chat.tsx`）保持原样，
-> 仍在 `/` 提供服务。实施平台是叠加在其上的新能力，两者互不干扰。
+> 仓库里原有的多 Provider LLM 聊天客户端（`lib/sdk/` + `components/chat.tsx`）仍在 `/`
+> 提供服务。它**通过进程内 MCP 连到实施平台**，可以在对话里查询项目、资产、规则与审计，
+> 但调不动任何写操作 —— 闸门仍在控制台那边。见「聊天客户端」一节。
 
 ---
 
@@ -87,6 +88,7 @@ npm run workspace:init   # 初始化工作区
 npm run core:smoke       # 领域层端到端（71 项断言，不涉及 MCP）
 npm run mcp:smoke        # MCP 端到端（85 项断言，走真实 MCP 协议）
 npm run mcp:smoke:http   # 同上，走 HTTP 通道（需先 npm run dev）
+npm run chat-tools:smoke # 聊天 ↔ 实施平台（113 项断言，含工具循环，不需要 LLM）
 npm run race:test        # 并发写保护（3 进程 × 50 并发写入）
 npm run dev              # 开发服务器
 npm run build            # 生产构建
@@ -193,7 +195,12 @@ workspace/
 - **`error` 级 findings 可以带理由豁免**。这偏离了「错误无条件阻断」的直觉说法，
   但那是能用的版本：否则一条误报的规则就永远绕不过去。
   豁免必须逐一给出理由，且会写进审计流水与交付清单。
-- 聊天客户端的 `lib/sdk/` 未接入 MCP，仍是独立的多 Provider 对话功能。
+- **对话里的工具只读**。写操作、豁免、提交审批、放行一律不在白名单里
+  （`lib/sdk/tools.ts`）。这是刻意的：让 AI 直接放行，「放行时刻重新计算规则」
+  这条闸门就变成了摆设。
+- **工具调用不做逐字动画**。参数是 JSON，服务端攒齐了才发 ——
+  把半截 JSON 推给界面只能逼它去容错一串解析不了的东西。
+- **非流式请求不带工具**。工具循环的意义是把中间过程推给用户看，而那正是流式才有的能力。
 - **聊天客户端的模型列表向接口拉取，但上下文窗口只有 Anthropic 给得了**。
   OpenAI 兼容的 `/v1/models` 只返回模型 id，所以那些模型的 token 计量条显示
   「上下文窗口未知」而不是编一个数出来。见下节。
@@ -235,3 +242,42 @@ workspace/
 `openrouter` / `qwen` / `ollama` 三个预设已删除。如果你之前配过它们，启动时会自动改写为
 OpenAI 兼容条目（保留 Key 与接口地址，名称标注「已并入自定义 Provider」），
 不需要重新配置。`localStorage` 里的配置会带上 `version` 字段，迁移只跑一次。
+
+---
+
+## 聊天客户端 × 实施平台
+
+对话界面也是一个 AI 客户端 —— 只是它跑在同进程里，而不是通过 stdio/HTTP 连进来。
+
+```
+浏览器
+  └─ chat.tsx ──→ /api/chat ──→ handleChatRequest（工具循环在这里）
+                                   │
+                                   ├─ 第一轮：模型要调工具
+                                   ├─ 进程内 MCP Client ←→ McpServer（同一套 lib/mcp）
+                                   ├─ 执行、把结果塞回 messages
+                                   └─ 第二轮：模型作答
+   ←────────── SSE：text / tool / tool_result item ──────────┘
+```
+
+**复用的是同一套工具定义**（`lib/mcp/server.ts` 装配的那 36 个），经
+`InMemoryTransport` 进程内连接，而不是在浏览器里再写一个 MCP 客户端
+（理由见 `app/(impl)/impl/actions.ts` 的文件头）。所以工具行为与审计
+不可能在第三条通道上漂移。
+
+### 白名单是显式的
+
+`lib/sdk/tools.ts` 里逐条列出对话可用的 20 个工具，**不**从上游的
+`readOnlyHint` 注解推导 —— 给对话新增一个工具应当是深思熟虑的动作。
+不在表里的工具，模型既看不到、也调不动（`callTool` 里另有一层拦截，
+因为参数是模型给的，不能假设它只点名自己见过的工具）。
+
+审计里这些调用记成 `chat-ui（AI·对话）`，与控制台的人工操作、
+Claude Code 的 `mcp-stdio` 调用三向可分。
+
+### 上下文裁剪会修工具配对
+
+倒着裁历史时，`role:"tool"` 的消息比它的 assistant 新，会先被收进来。
+预算正好卡在两者之间就会留下一条孤立的工具结果，provider 直接 400，
+而错误信息只会说「tool_result 没有对应的 tool_use」，看不出根因是裁剪。
+`trimMessagesToContextWindow` 因此多了一步 `repairToolPairing`。

@@ -8,7 +8,7 @@
  * 本文件不碰 fs，纯计算。
  */
 
-import type { Actor } from "./types";
+import type { Actor, ActorType, ActorVia } from "./types";
 
 export const SYSTEM_ACTOR: Actor = {
   type: "system",
@@ -32,11 +32,14 @@ export function consoleActor(name?: string): Actor {
 
 /**
  * MCP 操作者：由 initialize 的 clientInfo 推导。
- * via 区分 stdio / http，便于审计里看出是哪个通道来的。
+ * via 区分 stdio / http / chat，便于审计里看出是哪个通道来的。
+ *
+ * `via: "chat"` 是本平台自己那个对话界面 —— 它也是一个 AI 客户端，
+ * 只是跑在同进程里而不是通过 stdio/HTTP 连进来。
  */
 export function mcpActor(
   clientInfo: { name?: string; version?: string } | undefined,
-  via: "mcp-stdio" | "mcp-http",
+  via: "mcp-stdio" | "mcp-http" | "chat",
   tokenActorId?: string
 ): Actor {
   const clientName = clientInfo?.name?.trim() || "unknown-client";
@@ -62,16 +65,28 @@ export function mcpActor(
   };
 }
 
-/** 审计里展示用的一行描述 */
+/**
+ * 通道与身份类型的中文标签。
+ *
+ * 用 Record 而不是嵌套三元：两侧都是闭合联合，少写一个取值
+ * 编译器就会在这里报错，而不是悄悄落进最后的 else。
+ * 导出是给 UI 用的 —— 审计表格要按列拆分渲染，用不了 describeActor
+ * 那个整串，但同样不该把 "mcp-stdio" / "chat" 这种内部取值直接摆给用户看。
+ */
+export const VIA_LABELS: Record<ActorVia, string> = {
+  console: "控制台",
+  "mcp-stdio": "MCP stdio",
+  "mcp-http": "MCP HTTP",
+  chat: "对话",
+  cli: "命令行",
+};
+
+export const ACTOR_TYPE_LABELS: Record<ActorType, string> = {
+  human: "人",
+  ai: "AI",
+  system: "系统",
+};
+
 export function describeActor(actor: Actor): string {
-  const via =
-    actor.via === "console"
-      ? "控制台"
-      : actor.via === "mcp-stdio"
-        ? "MCP stdio"
-        : actor.via === "mcp-http"
-          ? "MCP HTTP"
-          : "命令行";
-  const kind = actor.type === "human" ? "人" : actor.type === "ai" ? "AI" : "系统";
-  return `${actor.name}（${kind}·${via}）`;
+  return `${actor.name}（${ACTOR_TYPE_LABELS[actor.type]}·${VIA_LABELS[actor.via]}）`;
 }

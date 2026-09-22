@@ -13,6 +13,7 @@
     "models:smoke": "tsx scripts/models-smoke.ts",
     "mcp:smoke": "tsx scripts/mcp-smoke.ts",
     "mcp:smoke:http": "tsx scripts/mcp-smoke.ts --http http://localhost:3000/api/mcp",
+    "chat-tools:smoke": "tsx scripts/chat-tools-smoke.ts",
     "race:test": "tsx scripts/race-test.ts",
     "typecheck": "tsc --noEmit"
   },

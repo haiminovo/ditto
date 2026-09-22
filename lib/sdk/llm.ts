@@ -20,10 +20,59 @@ import {
   parseSSELine,
   StreamState,
   applyEvent,
-  getFullText,
   createStreamState,
   StreamEvent,
+  ToolData,
+  ToolResultData,
 } from "./protocol";
+import type { StreamChunk } from "./types";
+
+/**
+ * 把一个流的当前状态里「还没吐出去的部分」吐出来。
+ *
+ * 文本项边到边吐（流式文本本来就是这层的目的）；工具调用项与结果项
+ * **攒齐一次给** —— 参数是 JSON，把半截的 JSON 推给界面只能逼它去容错
+ * 一串解析不了的东西，而这里并不需要逐字动画。
+ *
+ * 调用顺序依赖 `state.items` 是 Map：它保持插入顺序，所以多轮工具循环里
+ * 第二轮生成的文本会排在第一次工具调用之后，不会乱序。
+ */
+function* drainItems(
+  state: StreamState,
+  emittedText: Map<string, number>,
+  emittedItems: Set<string>
+): Generator<StreamChunk> {
+  for (const [itemId, item] of state.items) {
+    if (item.itemType === "text") {
+      const seen = emittedText.get(itemId) ?? 0;
+      if (item.content.length > seen) {
+        emittedText.set(itemId, item.content.length);
+        yield { type: "text", text: item.content.slice(seen) };
+      }
+      continue;
+    }
+
+    if (!item.isComplete || emittedItems.has(itemId)) continue;
+    emittedItems.add(itemId);
+
+    if (item.itemType === "tool") {
+      yield {
+        type: "tool_call",
+        id: itemId,
+        name: (item.data as ToolData).tool_name ?? "unknown",
+        argsJson: item.content,
+      };
+    } else if (item.itemType === "tool_result") {
+      const data = item.data as ToolResultData;
+      yield {
+        type: "tool_result",
+        id: data.tool_call_id ?? itemId,
+        result: item.content,
+        isError: data.is_error === true,
+      };
+    }
+  }
+}
 
 /**
  * Browser Model - 通过本地 API Route 调用，避免 CORS 问题
@@ -74,7 +123,10 @@ export class BrowserModel implements ChatModel {
     return { content: data.content };
   }
 
-  async *generateStream(messages: Message[], options?: LLMOptions): AsyncIterable<string> {
+  async *generateStream(
+    messages: Message[],
+    options?: LLMOptions
+  ): AsyncIterable<StreamChunk> {
     const response = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -83,7 +135,10 @@ export class BrowserModel implements ChatModel {
         modelName: this.model,
         providerConfig: this.providerConfig,
         messages,
-        options,
+        // enableTools 提到顶层：它是本平台的开关，不是要给模型 API 的参数，
+        // 混在 options 里会被 server 当 provider 参数透传出去
+        options: options ? { ...options, enableTools: undefined } : options,
+        enableTools: options?.enableTools,
         stream: true,
       }),
     });
@@ -101,7 +156,10 @@ export class BrowserModel implements ChatModel {
     const decoder = new TextDecoder("utf-8");
     let buffer = "";
     let state: StreamState | null = null;
-    let lastText = "";
+    // 已吐出去的量。曾经这里是用 getFullText 做字符串长度差分 —— 那个写法
+    // 只认文本，工具项发过来会被静默丢弃（getFullText 只返回 text item）。
+    const emittedText = new Map<string, number>();
+    const emittedItems = new Set<string>();
 
     while (true) {
       const { done, value } = await reader.read();
@@ -116,29 +174,18 @@ export class BrowserModel implements ChatModel {
         const event = parseSSELine(line);
         if (!event) continue;
 
-        // 初始化状态
         if (!state) {
           state = createStreamState(event.stream_id);
         }
 
-        // 应用事件
-        const newState = applyEvent(state, event);
-        state = newState;
+        state = applyEvent(state, event);
 
-        // 检查错误
         if (state.error) {
           throw new Error(`${state.error.code}: ${state.error.message}`);
         }
 
-        // 检查文本变化
-        const currentText = getFullText(state);
-        if (currentText.length > lastText.length) {
-          const delta = currentText.slice(lastText.length);
-          lastText = currentText;
-          yield delta;
-        }
+        yield* drainItems(state, emittedText, emittedItems);
 
-        // 流结束
         if (state.isComplete) {
           break;
         }
@@ -194,6 +241,16 @@ export function createModelFromConfig(
 
 /**
  * Anthropic Native API Model
+ *
+ * ⚠️ 这个类和下面的 OpenAICompatibleModel 在运行的应用里**永远不会被实例化**：
+ *    createModelFromConfig 的第一件事就是 `if (isBrowser()) return new BrowserModel(...)`，
+ *    而唯一的调用链起点 app/providers.tsx 带着 "use client"。
+ *    浏览器侧真正的 provider 调用在 server.ts 的两个 handle*Request 里。
+ *
+ *    所以这里只做了「让它继续编译」的最小适配（把文本包成 StreamChunk），
+ *    **没有**接工具调用 —— 那是给没人跑的路径维护第二份实现。
+ *    真要复活它们，请先把 server.ts 与这里的重复逻辑合并（types.ts 里已经
+ *    抱怨过三份复制的转换代码），而不是再抄一份。
  */
 export class AnthropicModel implements ChatModel {
   private client: Anthropic;
@@ -311,7 +368,10 @@ export class AnthropicModel implements ChatModel {
     };
   }
 
-  async *generateStream(messages: Message[], options?: LLMOptions): AsyncIterable<string> {
+  async *generateStream(
+    messages: Message[],
+    options?: LLMOptions
+  ): AsyncIterable<StreamChunk> {
     const registry = getDefaultRegistry();
     const entry = registry.resolve(this.model);
     const maxTokens = options?.maxTokens ?? entry?.maxTokens ?? 8192;
@@ -331,7 +391,9 @@ export class AnthropicModel implements ChatModel {
 
     for await (const chunk of stream) {
       if (chunk.type === "content_block_delta" && chunk.delta.type === "text_delta") {
-        yield chunk.delta.text;
+        // 只转文本，工具调用 block 被忽略 —— 见类文档：这是死代码，
+        // 不在这里维护第二份工具实现
+        yield { type: "text", text: chunk.delta.text };
       }
     }
   }
@@ -400,7 +462,10 @@ export class OpenAICompatibleModel implements ChatModel {
     };
   }
 
-  async *generateStream(messages: Message[], options?: LLMOptions): AsyncIterable<string> {
+  async *generateStream(
+    messages: Message[],
+    options?: LLMOptions
+  ): AsyncIterable<StreamChunk> {
     const registry = getDefaultRegistry();
     const entry = registry.resolve(this.model);
     const maxTokens = options?.maxTokens ?? entry?.maxTokens ?? 2048;
@@ -418,7 +483,8 @@ export class OpenAICompatibleModel implements ChatModel {
     for await (const chunk of stream) {
       const content = chunk.choices[0]?.delta?.content;
       if (content) {
-        yield content;
+        // 同 AnthropicModel：死代码，只转文本
+        yield { type: "text", text: content };
       }
     }
   }
@@ -452,7 +518,10 @@ export class SwappableModel implements ChatModel {
     return this.current.generate(messages, options);
   }
 
-  generateStream(messages: Message[], options?: LLMOptions): AsyncIterable<string> {
+  generateStream(
+    messages: Message[],
+    options?: LLMOptions
+  ): AsyncIterable<StreamChunk> {
     return this.current.generateStream(messages, options);
   }
 

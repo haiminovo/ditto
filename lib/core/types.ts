@@ -109,7 +109,7 @@ export function isEditable(status: AssetStatus): boolean {
 
 export type ActorType = "human" | "ai" | "system";
 
-export type ActorVia = "console" | "mcp-stdio" | "mcp-http" | "cli";
+export type ActorVia = "console" | "mcp-stdio" | "mcp-http" | "chat" | "cli";
 
 export interface Actor {
   type: ActorType;

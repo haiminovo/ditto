@@ -70,9 +70,32 @@ export type MessageContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } };
 
+/**
+ * 一次工具调用。
+ *
+ * `arguments` 保持**原始 JSON 字符串**，不做解析：
+ *   - 两个 provider 线上就是这个形状（OpenAI 的 function.arguments、
+ *     Anthropic 的 input_json_delta 拼出来的串）；
+ *   - 解析失败必须能被看见并当作错误回给模型，而不是在这里抛掉。
+ */
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+/**
+ * 归一化的消息形状。
+ *
+ * assistant 带 `toolCalls`、以及 `role: "tool"` 这两条，是工具调用能成立的前提：
+ * 模型必须在下一轮看得到「我上一轮调用了什么、拿到了什么」。
+ * 各 provider 的差异（Anthropic 的 tool_use/tool_result block、OpenAI 的
+ * tool_calls/tool 角色）在 server.ts 的转换函数里各自展开。
+ */
 export type Message =
   | { role: "user"; content: string | MessageContentPart[] }
-  | { role: "assistant"; content: string }
+  | { role: "assistant"; content: string; toolCalls?: ToolCall[] }
+  | { role: "tool"; toolCallId: string; content: string }
   | { role: "system"; content: string };
 
 export interface LLMResponse {
@@ -88,11 +111,31 @@ export interface LLMOptions {
   temperature?: number;
   maxTokens?: number;
   topP?: number;
+  /**
+   * 是否给模型挂实施平台的工具。
+   *
+   * 搭在 LLMOptions 上是因为这是从界面一路传到 /api/chat 的最短通路 ——
+   * BrowserModel 本来就是原样转发 options 的。
+   * ⚠️ 它**不是** provider 参数：BrowserModel 会把它提到请求体顶层
+   * （ChatRequest.enableTools），而不是塞进 options 里转给模型 API。
+   */
+  enableTools?: boolean;
 }
+
+/**
+ * 流式回调产出的结构化片段。
+ *
+ * 从 `AsyncIterable<string>` 升上来的原因很直接：文本之外还有工具调用要传，
+ * 而一个 string 装不下「这是一次工具调用」这件事。
+ */
+export type StreamChunk =
+  | { type: "text"; text: string }
+  | { type: "tool_call"; id: string; name: string; argsJson: string }
+  | { type: "tool_result"; id: string; result: string; isError: boolean };
 
 export interface ChatModel {
   generate(messages: Message[], options?: LLMOptions): Promise<LLMResponse>;
-  generateStream(messages: Message[], options?: LLMOptions): AsyncIterable<string>;
+  generateStream(messages: Message[], options?: LLMOptions): AsyncIterable<StreamChunk>;
   providerName(): string;
   modelName(): string;
 }
