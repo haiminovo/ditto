@@ -1,11 +1,11 @@
 /**
  * Ditto 实施平台 - MCP 服务端装配
  *
- * 一套工具定义，两个入口：
- *   mcp/stdio.ts            → StdioServerTransport（本地 AI 客户端）
- *   app/api/mcp/route.ts    → WebStandardStreamableHTTPServerTransport（远程）
+ * 一套工具定义，Web 内两个接入点：
+ *   app/api/mcp/route.ts    → WebStandardStreamableHTTPServerTransport
+ *   lib/sdk/tools.ts        → InMemoryTransport（Web 聊天内部桥接）
  *
- * 两个入口共用本文件，所以工具行为不可能在两个通道间漂移。
+ * 两个接入点共用本文件，所以工具行为不可能漂移。
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -33,7 +33,7 @@ export interface CreateServerOptions {
 /**
  * 组装一个完整的 MCP 服务端实例。
  *
- * 每个请求（HTTP 无状态模式）或每次进程启动（stdio）都会调用它。
+ * 每个 Web 请求（HTTP 无状态模式）都会调用它。
  * 注意：它不做任何 I/O，只有真正调用工具时才会读写工作区 ——
  * 所以构造本身很便宜，可以放心地按请求构造。
  */

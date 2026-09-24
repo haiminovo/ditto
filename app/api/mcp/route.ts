@@ -1,8 +1,8 @@
 /**
  * Ditto 实施平台 - HTTP Streamable MCP 入口
  *
- * 与 mcp/stdio.ts 共用同一套工具定义（lib/mcp/server.ts），所以两个通道
- * 的行为不可能漂移。
+ * 这是 Web 对外暴露的 MCP 传输。Web 聊天内部则通过 InMemoryTransport
+ * 复用同一套工具定义（lib/mcp/server.ts），所以行为不可能漂移。
  *
  * 关于**无状态模式**：
  * 每个请求新建 McpServer + transport，用完即弃（sessionIdGenerator: undefined）。
@@ -17,7 +17,10 @@ import type { NextRequest } from "next/server";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createMcpServer } from "@/lib/mcp/server";
 import { mcpActor } from "@/lib/core/actors";
-import { resolveWorkspaceRoot } from "@/lib/core/store/paths";
+import {
+  resolveActiveWorkspaceRoot,
+  resolveWorkspaceRootById,
+} from "@/lib/core/store/workspace-registry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,6 +31,7 @@ const ALLOWED_HEADERS = [
   "mcp-session-id",
   "mcp-protocol-version",
   "Last-Event-ID",
+  "x-ditto-workspace",
 ].join(", ");
 
 const EXPOSED_HEADERS = "mcp-session-id, mcp-protocol-version";
@@ -78,12 +82,21 @@ function withCleanup(response: Response, cleanup: () => Promise<void>): Response
   }
 
   const original = response.body;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let cleaned = false;
+  const cleanupOnce = () => {
+    if (cleaned) return;
+    cleaned = true;
+    void cleanup();
+  };
+
   const wrapped = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const reader = original.getReader();
+      const currentReader = original.getReader();
+      reader = currentReader;
       try {
         for (;;) {
-          const { done, value } = await reader.read();
+          const { done, value } = await currentReader.read();
           if (done) break;
           controller.enqueue(value);
         }
@@ -91,11 +104,18 @@ function withCleanup(response: Response, cleanup: () => Promise<void>): Response
       } catch (e) {
         controller.error(e);
       } finally {
-        void cleanup();
+        cleanupOnce();
       }
     },
-    cancel(reason) {
-      void original.cancel(reason).finally(() => void cleanup());
+    async cancel(reason) {
+      try {
+        if (reader) await reader.cancel(reason);
+        else await original.cancel(reason);
+      } catch {
+        // The reader may already have completed or the stream may be closing.
+      } finally {
+        cleanupOnce();
+      }
     },
   });
 
@@ -107,8 +127,28 @@ function withCleanup(response: Response, cleanup: () => Promise<void>): Response
 }
 
 async function handle(req: NextRequest): Promise<Response> {
+  const requestedWorkspace = req.headers.get("x-ditto-workspace")?.trim();
+  let root: string;
+  try {
+    root = requestedWorkspace
+      ? resolveWorkspaceRootById(requestedWorkspace)
+      : resolveActiveWorkspaceRoot();
+  } catch (error) {
+    return Response.json(
+      {
+        jsonrpc: "2.0",
+        error: {
+          code: -32602,
+          message: error instanceof Error ? error.message : String(error),
+        },
+        id: null,
+      },
+      { status: 400 }
+    );
+  }
+
   const { server } = createMcpServer({
-    root: resolveWorkspaceRoot(),
+    root,
     actor: actorFromRequest(req),
   });
 

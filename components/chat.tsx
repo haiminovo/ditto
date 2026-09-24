@@ -41,6 +41,8 @@ import {
 import { cn } from "@/components/ui/button";
 import { ToolCallCard, type UiToolCall } from "@/components/tool-call-card";
 import { useProviderModels } from "@/components/use-provider-models";
+import { useWorkspaces } from "@/components/use-workspaces";
+import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 
 interface ChatImage {
   id: string;
@@ -53,7 +55,7 @@ interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   images?: ChatImage[];
-  /** 这一轮助手调用了哪些实施平台工具 */
+  /** 这一轮助手调用了哪些工具 */
   toolCalls?: UiToolCall[];
   isStreaming?: boolean;
 }
@@ -130,9 +132,10 @@ export function ChatPage() {
   const [pendingImages, setPendingImages] = useState<ChatImage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  // 实施平台工具开关。存独立的键，不进 ditto:config —— 那是 provider 配置，
+  // Harness 工具开关。存独立的键，不进 ditto:config —— 那是 provider 配置，
   // 有自己的结构版本与迁移逻辑，为这么一个开关动它不划算。
   const [enableTools, setEnableTools] = useState(true);
+  const workspaces = useWorkspaces();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { sendMessage, currentModel, config, saveConfig, updateProvider, deleteProvider, isConfigured } = useApp();
@@ -308,6 +311,7 @@ export function ChatPage() {
 
       const { stream } = await sendMessage(messagesForApi, true, {
         enableTools,
+        workspaceId: workspaces.active?.id,
       });
 
       if (stream) {
@@ -416,7 +420,11 @@ export function ChatPage() {
   return (
     <div className="flex h-screen bg-gray-50 dark:bg-gray-950">
       <div className="w-64 bg-white dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800 flex flex-col">
-        <div className="p-4">
+        <div className="p-4 pb-3">
+          <WorkspaceSwitcher controller={workspaces} />
+        </div>
+
+        <div className="px-4 pb-3">
           <Button
             className="w-full justify-start gap-2"
             variant="secondary"
@@ -464,9 +472,6 @@ export function ChatPage() {
             <Settings className="w-4 h-4" />
             设置
           </Button>
-
-          <div className="my-2 border-t border-gray-200 dark:border-gray-800" />
-
         </div>
       </div>
 
@@ -479,6 +484,11 @@ export function ChatPage() {
                 {currentModel && (
                   <p className="text-sm text-gray-500 dark:text-gray-400">
                     {currentModel.provider} / {currentModel.model}
+                  </p>
+                )}
+                {workspaces.active && (
+                  <p className="mt-0.5 text-xs text-gray-400 dark:text-gray-500">
+                    工作区 / {workspaces.active.name}
                   </p>
                 )}
               </div>
@@ -825,7 +835,7 @@ function SettingsModal({
         </div>
 
         <CardContent className="flex-1 overflow-y-auto pt-6">
-          {/* 实施平台工具开关。
+          {/* Harness 工具开关。
               没有为它单开一个 tab：那会重演「models tab 从来没渲染过 UI」
               的老问题。这里就一个开关，占一行足够。 */}
           <div className="mb-6 pb-6 border-b border-gray-200 dark:border-gray-800">
@@ -837,10 +847,10 @@ function SettingsModal({
                 className="mt-0.5 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
               />
               <div>
-                <div className="text-sm font-medium">启用实施平台工具</div>
+                <div className="text-sm font-medium">启用工具</div>
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                  允许模型在对话中查询项目、资产、规则与审计（只读，外加跑规则自检）。
-                  写操作与审批不在本对话界面开放。
+                  允许模型调用当前 harness profile 注册的工具。
+                  工具的可见范围与执行权限由工具源和策略分别控制。
                 </p>
                 <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
                   若你的网关不支持 <code className="font-mono">tools</code> 参数而报错，关掉它即可。

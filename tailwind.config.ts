@@ -23,10 +23,15 @@ const config: Config = {
           from: { opacity: "0", transform: "translateY(4px)" },
           to: { opacity: "1", transform: "translateY(0)" },
         },
+        "loading-sweep": {
+          from: { transform: "translateX(-110%)" },
+          to: { transform: "translateX(310%)" },
+        },
       },
       animation: {
         "select-down": "select-down 130ms ease-out",
         "select-up": "select-up 130ms ease-out",
+        "loading-sweep": "loading-sweep 1.15s ease-in-out infinite",
       },
     },
   },

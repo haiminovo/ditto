@@ -2,6 +2,12 @@
  * Ditto SDK - Core Types
  */
 
+import type {
+  HarnessMessage,
+  HarnessMessageContentPart,
+  HarnessToolCall,
+} from "../harness/types";
+
 /**
  * 预定义的提供商配置。
  *
@@ -66,9 +72,7 @@ export interface Config {
   version?: number;
 }
 
-export type MessageContentPart =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
+export type MessageContentPart = HarnessMessageContentPart;
 
 /**
  * 一次工具调用。
@@ -78,11 +82,7 @@ export type MessageContentPart =
  *     Anthropic 的 input_json_delta 拼出来的串）；
  *   - 解析失败必须能被看见并当作错误回给模型，而不是在这里抛掉。
  */
-export interface ToolCall {
-  id: string;
-  name: string;
-  arguments: string;
-}
+export type ToolCall = HarnessToolCall;
 
 /**
  * 归一化的消息形状。
@@ -92,11 +92,7 @@ export interface ToolCall {
  * 各 provider 的差异（Anthropic 的 tool_use/tool_result block、OpenAI 的
  * tool_calls/tool 角色）在 server.ts 的转换函数里各自展开。
  */
-export type Message =
-  | { role: "user"; content: string | MessageContentPart[] }
-  | { role: "assistant"; content: string; toolCalls?: ToolCall[] }
-  | { role: "tool"; toolCallId: string; content: string }
-  | { role: "system"; content: string };
+export type Message = HarnessMessage;
 
 export interface LLMResponse {
   content: string;
@@ -112,7 +108,7 @@ export interface LLMOptions {
   maxTokens?: number;
   topP?: number;
   /**
-   * 是否给模型挂实施平台的工具。
+   * 是否给模型挂当前 harness profile 的工具。
    *
    * 搭在 LLMOptions 上是因为这是从界面一路传到 /api/chat 的最短通路 ——
    * BrowserModel 本来就是原样转发 options 的。
@@ -120,6 +116,13 @@ export interface LLMOptions {
    * （ChatRequest.enableTools），而不是塞进 options 里转给模型 API。
    */
   enableTools?: boolean;
+  /**
+   * 当前聊天使用的工作区 id。
+   *
+   * 与 enableTools 一样，这不是 Provider 参数；BrowserModel 会把它提到
+   * ChatRequest 顶层，服务端再通过注册表解析真实路径。
+   */
+  workspaceId?: string;
 }
 
 /**

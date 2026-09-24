@@ -10,3 +10,4 @@ ditto.json
 
 # 实施平台运行时数据（实施资产落在这里，不纳入版本控制）
 workspace/
+.ditto/

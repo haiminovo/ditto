@@ -47,6 +47,7 @@ import { handleChatRequest } from "../lib/sdk/server";
 import type { Message, ModelEntry } from "../lib/sdk/types";
 import { queryAudit } from "../lib/core/store/audit";
 import { workspacePaths } from "../lib/core/store/paths";
+import { listWorkspaceState } from "../lib/core/store/workspace-registry";
 
 /* ------------------------------------------------------------------ */
 
@@ -374,7 +375,7 @@ async function main() {
   /* ------------------------------------------------------------------ */
   section("10. 工具循环：拿一个假的 provider 把整条路跑通");
 
-  // 这一步验的是本轮改动里最绕的部分 —— server.ts 里的多轮循环。
+  // 这一步验的是 harness → server adapter → SSE 的完整工具循环。
   // 用真实模型跑不了 CI（要 key、要钱、结果不确定），所以起一个假的
   // OpenAI 兼容端点：第一轮要求调工具，第二轮给答案。循环对不对，
   // 看它能不能自己把这两轮接起来。
@@ -449,10 +450,12 @@ async function main() {
   await new Promise<void>((resolve) => fake.listen(0, "127.0.0.1", resolve));
   const port = (fake.address() as AddressInfo).port;
 
-  // handleChatRequest 里的桥接层走 resolveWorkspaceRoot()，
-  // 得让它指到临时工作区
+  // 让 workspaceId 解析固定使用这次冒烟创建的临时工作区。
   const previousWorkspace = process.env.DITTO_WORKSPACE;
+  const previousRegistry = process.env.DITTO_WORKSPACE_REGISTRY;
   process.env.DITTO_WORKSPACE = root;
+  process.env.DITTO_WORKSPACE_REGISTRY = path.join(root, ".ditto", "workspaces.json");
+  const workspaceId = (await listWorkspaceState()).active!.id;
 
   try {
     const response = await handleChatRequest({
@@ -466,6 +469,7 @@ async function main() {
       messages: [{ role: "user", content: "帮我看看项目状态" }],
       stream: true,
       enableTools: true,
+      workspaceId,
     });
 
     assertEq(response.status, 200, "返回 200");
@@ -542,9 +546,37 @@ async function main() {
       `{"projectId":"${fakeProjectId}"}`,
       "回传的参数是拼好的完整 JSON"
     );
+
+    /* --- 非流式同样走 harness，不应退回“无工具单轮” --- */
+    requests.length = 0;
+    const nonStreamResponse = await handleChatRequest({
+      provider: "custom",
+      modelName: "fake-model",
+      providerConfig: {
+        apiKey: "sk-test",
+        baseURL: `http://127.0.0.1:${port}/v1`,
+        type: "openai",
+      },
+      messages: [{ role: "user", content: "再帮我看看项目状态" }],
+      stream: false,
+      enableTools: true,
+      workspaceId,
+    });
+    const nonStreamBody = (await nonStreamResponse.json()) as { content?: string };
+
+    assertEq(nonStreamResponse.status, 200, "非流式返回 200");
+    assertEq(requests.length, 2, "非流式同样执行了完整工具循环");
+    assert(
+      nonStreamBody.content?.includes("我查一下") === true &&
+        nonStreamBody.content?.includes("查到了，项目存在") === true,
+      "非流式结果包含工具调用前后的文本",
+      `= ${nonStreamBody.content ?? ""}`
+    );
   } finally {
     if (previousWorkspace === undefined) delete process.env.DITTO_WORKSPACE;
     else process.env.DITTO_WORKSPACE = previousWorkspace;
+    if (previousRegistry === undefined) delete process.env.DITTO_WORKSPACE_REGISTRY;
+    else process.env.DITTO_WORKSPACE_REGISTRY = previousRegistry;
     await new Promise<void>((resolve) => fake.close(() => resolve()));
   }
 

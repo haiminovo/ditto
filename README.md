@@ -1,278 +1,403 @@
 # Ditto
 
-**以项目为中心，以实施资产为对象，以能力包适配不同平台，以 MCP 连接 AI 客户端，以规则引擎和审批机制保证交付质量。**
+Ditto 是一个仅保留 Web 运行形态的通用 Agent Harness，并内置一套以项目、资产、规则和审批为核心的 MCP 实施交付平台。
 
-一个基于 MCP 的实施交付平台。AI 客户端（Claude Code / Cursor / Claude Desktop）通过 MCP
-端到端驱动「建项目 → 渲染资产 → 跑规则 → 整改 → 提交审批 → 放行 → 导出交付物」；
+项目分为四层：
 
-> 仓库里原有的多 Provider LLM 聊天客户端（`lib/sdk/` + `components/chat.tsx`）仍在 `/`
-> 提供服务。它**通过进程内 MCP 连到实施平台**，可以在对话里查询项目、资产、规则与审计，
-> 但调不动任何写操作。见「聊天客户端」一节。
+1. `lib/harness` 负责通用模型与工具循环。
+2. `lib/sdk` 负责 Provider、消息协议、SSE 和 Web 聊天接入。
+3. `lib/core`、`lib/rules`、`lib/capabilities` 负责领域模型、规则和能力包。
+4. `lib/mcp` 与 `app` 负责把领域能力暴露给 Web UI 和 HTTP MCP。
 
----
+项目不启动 stdio 子进程。所有运行入口都来自 Web 服务：浏览器 UI、`/api/chat`、`/api/models` 和 `/api/mcp`。
 
 ## 快速开始
 
 ```bash
 npm install
-npm run workspace:init      # 初始化工作区，安装内置能力包
-npm run dev                 # 对话界面：http://localhost:3000
+npm run workspace:init
+npm run dev
 ```
 
-接入 Claude Code：
+默认地址：
 
-```bash
-claude mcp add ditto --scope user \
-  -e DITTO_WORKSPACE=/绝对路径/ditto/workspace \
-  -- /绝对路径/ditto/node_modules/.bin/tsx /绝对路径/ditto/mcp/stdio.ts
+- Web UI：`http://localhost:3000`
+- HTTP MCP：`http://localhost:3000/api/mcp`
 
-claude mcp list && claude mcp get ditto
+## 目录总览
+
+```text
+app/                    Next.js Web 应用与 API Routes
+components/             浏览器端页面、聊天面板和基础 UI
+lib/
+  harness/              Provider 中立的 Agent Harness
+  sdk/                  Provider 适配、模型注册、SSE 和聊天服务端
+  core/                 领域类型、文件存储和唯一业务操作层
+  rules/                声明式规则引擎
+  capabilities/         能力包、模板和内置通用底座
+  mcp/                  进程内 MCP 服务端、工具、资源和提示词
+  workspace/             工作区选择协议与共享类型
+scripts/                工作区初始化、冒烟测试和辅助脚本
+workspace/              运行时数据，默认不纳入 git
 ```
 
-> **cwd 是头号坑**：`claude mcp add` 用 Claude Code 会话自己的 cwd 启动服务端，
-> 在别的目录开会话就会把 `./workspace` 解析到错的地方。
-> 必须显式传 `DITTO_WORKSPACE` 并用绝对路径引用 `tsx`。
+## 根目录配置
 
-接入 Cursor：同形配置写在 `~/.cursor/mcp.json`。
-接入 Claude Desktop：`claude_desktop_config.json`；其 PATH 受限，`npx` 解析不到时用
-`command: "/bin/zsh", args: ["-lc", "npx tsx /绝对路径/mcp/stdio.ts"]`。
-
-HTTP 通道（需先 `npm run dev`）：
-
-```bash
-claude mcp add --transport http ditto-local http://localhost:3000/api/mcp
-```
-
----
-
-## 五个核心概念
-
-| 概念 | 说明 |
+| 文件 | 职责 |
 |---|---|
-| **项目** | 一切的中心。资产属于项目，规则挂载在项目上，审批发生在项目内。 |
-| **实施资产** | 交付物对象，是工作区磁盘上的**真实文件**，可被 git 管理和人工直接查看。 |
-| **能力包** | 平台适配载体。决定项目能用哪些模板、受哪些规则约束。 |
-| **规则引擎** | **声明式数据**，不是代码。产出 error / warn / info 三级结论。 |
-| **审批闸门** | 放行时刻**重新计算**规则。存量结论只是证据，不是权威。 |
+| `package.json` | 项目依赖、Node 版本和全部运行/测试命令。 |
+| `package-lock.json` | npm 依赖锁定文件。 |
+| `next.config.js` | Next.js 构建配置。 |
+| `tsconfig.json` | TypeScript 编译选项和 `@/*` 路径别名。 |
+| `tailwind.config.ts` | Tailwind 扫描范围和主题扩展。 |
+| `postcss.config.js` | Tailwind 与 Autoprefixer 的 PostCSS 配置。 |
+| `next-env.d.ts` | Next.js 自动生成的类型声明。 |
+| `.gitignore` | 忽略构建产物、环境文件和工作区运行数据。 |
 
----
+## `app/`
 
-## 工作流
+`app` 是 Next.js App Router 入口，只负责 Web 页面和 HTTP 适配，不实现领域逻辑。
 
-```
-建项目（补齐变量）
-   ↓
-从能力包渲染资产骨架        ← 模板是骨架，默认过不了规则，这是设计如此
-   ↓
-执行规则 ──→ 有命中 ──→ 整改 ──→ 重跑（循环）
-   ↓ 无命中
-闸门预检（dry-run，不改状态）
-   ↓
-提交评审 → 审批决策 → 发布
-   ↓
-导出交付包（只有已发布的资产会进包）
-```
+| 文件 | 职责 |
+|---|---|
+| `app/layout.tsx` | 根布局、全局样式和站点元数据。 |
+| `app/page.tsx` | Web 首页。未配置 Provider 时显示配置向导，配置完成后显示聊天页面。 |
+| `app/providers.tsx` | 客户端全局状态。负责加载配置、创建模型集合、保存 Provider、发送聊天请求。 |
+| `app/globals.css` | Tailwind 入口和全局基础样式。 |
+| `app/icon.png`、`app/apple-icon.png`、`app/favicon.ico` | Web 应用图标。 |
 
-平台提供 5 个 MCP Prompt 作为作业指导书：`ditto_new_project`、`ditto_asset_authoring`、
-`ditto_fix_findings`、`ditto_pre_acceptance_review`、`ditto_handover_summary`。
-每个都要求先调 `ditto_handoff` —— 一次调用拿全状态与建议的下一步动作。
+### `app/api/`
 
----
+| 路由 | 职责 |
+|---|---|
+| `app/api/chat/route.ts` | 聊天 HTTP 入口。把请求交给 `handleChatRequest`，并向下传递浏览器断开信号。 |
+| `app/api/models/route.ts` | Provider 模型列表代理，避免浏览器直连第三方 API 时的 CORS 问题。 |
+| `app/api/mcp/route.ts` | HTTP Streamable MCP 入口。每次请求创建临时 MCP 服务端，响应结束后清理。 |
+| `app/api/workspaces/route.ts` | 工作区列表、添加、切换、初始化和移除绑定。 |
 
-## 命令
+`/api/mcp` 是 Web 形态下的对外 MCP 传输。Web 聊天则通过进程内 `InMemoryTransport` 使用同一套工具定义。
 
-```bash
-npm run typecheck        # tsc --noEmit（tsx 不做类型检查，必须单独跑）
-npm run workspace:init   # 初始化工作区
-npm run core:smoke       # 领域层端到端（71 项断言，不涉及 MCP）
-npm run mcp:smoke        # MCP 端到端（85 项断言，走真实 MCP 协议）
-npm run mcp:smoke:http   # 同上，走 HTTP 通道（需先 npm run dev）
-npm run chat-tools:smoke # 聊天 ↔ 实施平台（113 项断言，含工具循环，不需要 LLM）
-npm run race:test        # 并发写保护（3 进程 × 50 并发写入）
-npm run dev              # 开发服务器
-npm run build            # 生产构建
-```
+## `components/`
 
-三个冒烟脚本都以退出码反映结果，可直接进 CI。
+`components` 只负责浏览器交互和展示，不直接读写工作区文件。
 
----
+| 文件 | 职责 |
+|---|---|
+| `components/chat.tsx` | 主聊天界面。管理会话、消息、图片、流式状态、工具卡片、Token 估算和设置弹窗。 |
+| `components/setup.tsx` | 首次配置向导。选择 Provider、填写 API Key、拉取模型并保存配置。 |
+| `components/tool-call-card.tsx` | 工具调用卡片。展示工具名、参数、执行状态和结果。 |
+| `components/use-provider-models.ts` | 客户端 Hook。调用 `/api/models`、处理加载状态、缓存和手动模型列表。 |
+| `components/use-workspaces.ts` | 客户端 Hook。读取并管理工作区列表和当前选择。 |
+| `components/workspace-switcher.tsx` | 侧边栏工作区入口和选择弹窗。 |
+| `components/ui/*` | 基础 UI 组件，包括 Button、Card、Input、Select、Table、Textarea 和 Badge。 |
 
-## 架构
+`components/ui` 不应承载业务规则。领域状态和动作必须通过 API 或服务端操作层完成。
 
-```
-lib/core/          纯领域层
-  types.ts         类型与状态机（零 import）
-  identity.ts      项目固有变量（渲染与规则共用同一份）
-  store/           文件工作区 I/O：原子写、跨进程锁、审计哈希链
-  ops/             ★ 共享操作层：唯一实现，含审计发射
-lib/rules/         规则引擎（纯函数，注入 I/O）
-lib/capabilities/  能力包加载与模板渲染
-lib/mcp/           MCP 服务端装配：工具 / 资源 / 提示词
-mcp/stdio.ts       stdio 入口
-app/api/mcp/       HTTP Streamable 入口
-workspace/         运行时数据（gitignore）
-```
+## `lib/harness/`
 
-**依赖方向单向**：`core ← rules ← capabilities ← mcp ← {mcp/, app/}`。
+通用 Agent Harness。它不依赖 Ditto、MCP、Anthropic 或 OpenAI，只处理模型轮次与工具循环。
 
-### 最重要的一条结构规则
+| 文件 | 职责 |
+|---|---|
+| `lib/harness/types.ts` | Harness 公共契约：消息、工具源、模型适配器、权限、审批和运行事件。 |
+| `lib/harness/runtime.ts` | `runHarness` 主循环。负责多轮模型调用、工具执行、结果回注、取消和超时。 |
+| `lib/harness/policy.ts` | 工具策略实现，提供 allow-all、显式白名单和统一拒绝策略。 |
+| `lib/harness/index.ts` | Harness 公共出口。 |
 
-```
-lib/core/ops/*.ts                 ← 唯一实现（业务逻辑 + 审计）
-  └─ lib/mcp/tools/*.ts           ← MCP 适配器（zod 进）
-```
+核心扩展点：
 
-入口层**必须只是薄壳**。各写一份逻辑的后果很具体：审计流水分叉，
-同一个动作在不同入口得出不同结论，闸门随之失去意义。
+- `HarnessModelAdapter`：把某个模型 Provider 接入运行时。
+- `HarnessToolSource`：提供工具定义并执行工具。
+- `HarnessToolPolicy`：决定工具是 allow、deny 还是需要审批。
+- `HarnessApprovalHandler`：处理需要人工确认的工具调用。
 
----
+`runHarness` 不持久化会话。调用方持有消息历史，并消费 `HarnessRunEvent`。
 
-## 数据布局
+## `lib/sdk/`
 
-```
+Provider 客户端和 Web 聊天服务端。
+
+| 文件 | 职责 |
+|---|---|
+| `lib/sdk/types.ts` | Provider 配置、模型信息、聊天消息和 ChatModel 接口。消息类型复用 Harness 契约。 |
+| `lib/sdk/llm.ts` | 浏览器侧模型封装，负责把请求发到 `/api/chat`。 |
+| `lib/sdk/server.ts` | 服务端聊天处理。解析 Anthropic/OpenAI 兼容协议，并把单轮模型调用适配为 Harness。 |
+| `lib/sdk/tools.ts` | Ditto MCP ToolSource。创建进程内 MCP 客户端，并实施聊天工具白名单。 |
+| `lib/sdk/registry.ts` | 模型元数据、Token 估算、上下文裁剪和工具消息配对修复。 |
+| `lib/sdk/protocol.ts` | SSE 流协议。定义 item 生命周期、工具调用、文本增量和客户端状态归并。 |
+| `lib/sdk/index.ts` | 浏览器可安全导入的 SDK 出口。 |
+
+### `lib/sdk/server.ts` 的边界
+
+该文件的聊天链路只做两件事：
+
+1. 把不同 Provider 的流式输出转换为 `text_delta` 和 `round_end`。
+2. 把 Harness 事件序列化为 Web 使用的 SSE。
+
+文件还包含 `/api/models` 使用的 Provider 模型列表处理逻辑。
+
+工具权限、审批、最大轮数和超时不由 Provider 适配层决定，而是交给 `lib/harness`。
+
+## `lib/core/`
+
+领域层。这里定义 Ditto 的业务对象、状态机、磁盘布局和唯一业务操作实现。
+
+### 根文件
+
+| 文件 | 职责 |
+|---|---|
+| `lib/core/types.ts` | 纯类型与常量。定义项目、资产、审批、规则结果、操作者和错误码等共享结构。 |
+| `lib/core/identity.ts` | 项目固有变量。模板渲染和规则校验共用同一套变量解析。 |
+| `lib/core/errors.ts` | 领域错误。业务层抛 `CoreError`，入口层负责转换为 HTTP 或 MCP 错误。 |
+| `lib/core/actors.ts` | 操作者构造。区分 Web 对话、HTTP MCP、本地脚本和系统操作者。 |
+| `lib/core/ids.ts` | ULID 生成和 `ditto://` URI 解析。 |
+
+### `lib/core/ops/`
+
+`ops` 是唯一允许实现领域业务动作的目录。MCP 工具只能调用这里。
+
+| 文件 | 职责 |
+|---|---|
+| `lib/core/ops/context.ts` | 操作上下文。包含工作区根目录、操作者、时钟和 ID 生成器。 |
+| `lib/core/ops/project-ops.ts` | 创建、更新、流转项目，以及挂载能力包。 |
+| `lib/core/ops/asset-ops.ts` | 创建、更新、改版、删除和查询资产，并维护版本历史。 |
+| `lib/core/ops/template-ops.ts` | 使用能力包模板生成资产骨架。 |
+| `lib/core/ops/rule-ops.ts` | 合并规则包、执行规则并保存运行记录。 |
+| `lib/core/ops/approval-ops.ts` | 审批状态机和发布闸门。放行前重新计算规则。 |
+| `lib/core/ops/delivery-ops.ts` | 导出已发布资产和交付清单。 |
+| `lib/core/ops/handoff.ts` | 生成 AI 客户端的上下文交接摘要和下一步建议。 |
+| `lib/core/ops/index.ts` | 操作层公共出口。 |
+
+### `lib/core/store/`
+
+存储层只负责可靠的磁盘 I/O，不决定业务规则。
+
+| 文件 | 职责 |
+|---|---|
+| `lib/core/store/paths.ts` | 解析工作区，生成项目、能力包路径，并执行路径逃逸检查。 |
+| `lib/core/store/fsjson.ts` | 原子写文件和 JSON，计算哈希与 canonical JSON。 |
+| `lib/core/store/lock.ts` | 项目写锁。包含进程内 mutex 和跨进程 mkdir 锁。 |
+| `lib/core/store/workspace.ts` | 初始化工作区和读取工作区概览。 |
+| `lib/core/store/audit.ts` | 追加式 JSONL 审计流水和哈希链校验。 |
+| `lib/core/store/projects.ts` | 项目文件的纯读写。 |
+| `lib/core/store/assets.ts` | 资产索引、正文和历史版本的纯读写。 |
+| `lib/core/store/runs.ts` | 规则执行记录读写。 |
+| `lib/core/store/approvals.ts` | 审批单据读写。 |
+| `lib/core/store/capabilities.ts` | 扫描工作区能力包和规则包。 |
+| `lib/core/store/workspace-registry.ts` | Web 工作区注册表。校验路径、持久化选择和初始化自选目录。 |
+| `lib/core/store/index.ts` | 存储层公共出口。 |
+
+除 `fsjson.ts` 外，其他模块不应直接调用底层文件写入 API。
+
+## `lib/rules/`
+
+规则引擎把质量要求表达为数据，而不是可执行代码。
+
+| 文件 | 职责 |
+|---|---|
+| `lib/rules/schema.ts` | 校验规则包结构，禁止可执行键和不安全正则。 |
+| `lib/rules/engine.ts` | 合并规则、匹配资产、执行检查器并生成确定性结果。 |
+| `lib/rules/checkers.ts` | 内置检查器。支持内容、JSON、Markdown、路径、大小等检查。 |
+| `lib/rules/glob.ts` | 零依赖 glob 匹配，支持 `**`、`*`、`?` 和 `{a,b}`。 |
+
+规则包来源优先级为：能力包自带规则，然后是工作区 `rulepacks/` 覆盖。
+
+## `lib/capabilities/`
+
+能力包把平台差异放在数据里，而不是散落在业务代码中。
+
+| 文件 | 职责 |
+|---|---|
+| `lib/capabilities/loader.ts` | 扫描并校验 `capability.json`、模板和规则包。 |
+| `lib/capabilities/render.ts` | 渲染模板变量、条件、循环和局部模板。 |
+| `lib/capabilities/builtin/general.ts` | 通用底座能力包清单和种子入口。 |
+| `lib/capabilities/builtin/general-templates.ts` | 项目方案、需求、部署、测试、验收等模板。 |
+| `lib/capabilities/builtin/general-rules.ts` | 通用交付质量规则。 |
+
+新增平台能力通常只需要在 `workspace/capabilities/<id>/` 下放入能力包数据。
+
+## `lib/mcp/`
+
+MCP 是领域能力的调用协议层，不承载业务逻辑。
+
+| 文件 | 职责 |
+|---|---|
+| `lib/mcp/server.ts` | 组装 MCP 服务端，注册工具、资源和提示词。 |
+| `lib/mcp/result.ts` | 统一工具返回值，把领域错误转换为 MCP 可读错误。 |
+| `lib/mcp/resources.ts` | 注册工作区、项目、资产等可挂载资源。 |
+| `lib/mcp/prompts.ts` | 提供建项、写资产、整改、验收和交接提示词。 |
+
+### `lib/mcp/tools/`
+
+| 文件 | 职责 |
+|---|---|
+| `lib/mcp/tools/project-asset.ts` | 项目、资产、工作区和交接类工具。 |
+| `lib/mcp/tools/capability-rule.ts` | 能力包、模板和规则执行工具。 |
+| `lib/mcp/tools/approval-audit.ts` | 审批、发布、导出和审计工具。 |
+
+工具适配器只负责 zod 参数校验和文本结果转换，必须调用 `lib/core/ops`。
+
+## `lib/workspace/`
+
+| 文件 | 职责 |
+|---|---|
+| `lib/workspace/types.ts` | 浏览器与服务端共享的工作区展示结构和 API 返回类型。 |
+
+## `scripts/`
+
+| 脚本 | 职责 |
+|---|---|
+| `scripts/workspace-init.ts` | 初始化工作区并安装内置能力包。 |
+| `scripts/core-smoke.ts` | 领域层端到端测试，不经过 MCP。 |
+| `scripts/harness-smoke.ts` | 通用 Harness 测试，使用假模型和假工具。 |
+| `scripts/chat-tools-smoke.ts` | Web 聊天、Harness、MCP ToolSource 和 SSE 的集成测试。 |
+| `scripts/mcp-smoke.ts` | 通过 HTTP MCP 驱动的端到端交付测试。 |
+| `scripts/models-smoke.ts` | Provider 模型列表、错误处理、超时和密钥脱敏测试。 |
+| `scripts/race-test.ts` | 多进程并发写测试。 |
+| `scripts/workspace-smoke.ts` | 工作区注册、切换、安全路径和移除绑定测试。 |
+| `scripts/make-favicon.ts` | 生成 Web 图标资源。 |
+
+## `workspace/`
+
+`workspace` 是默认运行时数据目录，不纳入 git。
+
+```text
 workspace/
   ditto.workspace.json
-  audit/YYYY-MM.jsonl              追加式，哈希链
-  capabilities/general/            能力包（数据，可改）
-    capability.json  templates/  rules/
-  rulepacks/                       工作区级规则包（可覆盖能力包规则）
-  projects/<项目>/
-    project.json  assets.json
-    assets/<逻辑路径>               活跃版本真实文件
-    versions/<assetId>/v<N>.<ext>  不可变历史
-    runs/  approvals/
-  exports/<项目>-<时间戳>/
+  audit/YYYY-MM.jsonl
+  capabilities/<capability>/
+    capability.json
+    templates/
+    rules/
+  rulepacks/
+  projects/<project>/
+    project.json
+    assets.json
+    assets/<logical-path>
+    versions/<asset-id>/v<N>.<ext>
+    runs/
+    approvals/
+  exports/<project>-<timestamp>/
 ```
 
-**并发保护**（`next dev` 与 Claude Code 的 stdio 服务端会同时写同一工作区）：
+工作区路径按以下顺序解析：
 
-1. 进程内 async mutex —— 按 projectId 串行
-2. 跨进程 mkdir 锁 —— 带过期抢占
-3. 原子写 —— tmp + fsync + rename + 目录 fsync
-4. `rev` 乐观并发 —— 传入 `expectedRev`，不匹配返回 `E_CONFLICT`
+1. `DITTO_WORKSPACE`
+2. 从当前目录向上查找包含 `workspace/ditto.workspace.json` 的目录
+3. 当前目录下的 `workspace/`
 
----
+Web 工作区选择保存在 `.ditto/workspaces.json`。该文件记录默认工作区和用户
+添加的本机目录，但不会把工作区内容复制进仓库。删除或移除工作区绑定不会删除
+磁盘目录。
 
-## 扩展：新增一个平台能力包
+## 主要调用链
 
-**能力包是数据，不是代码 —— 加 K8s / Linux / 云厂商包不需要改任何 TypeScript。**
+### Web 聊天
 
-在 `workspace/capabilities/` 下新建目录，放入：
-
-- `capability.json` —— 清单：模板列表、所需变量、规则包引用、适配平台
-- `templates/` —— 模板文件，用 `{{变量}}` 占位
-- `rules/` —— 该平台自带的规则包（纯 JSON）
-
-下一次读取能力包列表即可看到。项目挂载时，平台标识匹配的包会自动挂载。
-
----
-
-## 安全与鉴权边界
-
-**必须说清楚的一件事**：操作者身份（actor）来自客户端自报，
-**这不是身份认证，不构成安全边界**。它的作用是流程留痕与审计追溯。
-真正的鉴权（MCP OAuth / 反向代理 SSO）不在本平台范围内。
-
-配置 `DITTO_MCP_TOKENS="tokenA:张三,tokenB:李四"` 可让 HTTP 通道的审计区分到人，
-但这仍然只是「记名」，不是「验证」。
-
-规则引擎的另一条边界：**规则是数据，引擎内没有 `eval` / `new Function`**。
-加载时会拒绝含可执行键（`code` / `fn` / `source` / `eval` …）的规则包，
-并拒绝嵌套量词正则（`(a+)+` 这类 ReDoS 写法）。规则来自工作区文件，
-是用户与 AI 都能写的输入，这条防线是必须的。
-
----
-
-## 已知限制
-
-- **HTTP 入口假定长驻单进程**（`npm run dev` / `next start`）。无状态模式每次请求新建实例，
-  所以在无服务器平台上不会串会话，但也不保留跨请求状态（本平台工具集不需要）。
-- **v1 不解析 YAML**。YAML 资产退化为 forbidden-content 与体积检查；
-  `format-valid` 目前只支持 JSON 与 Markdown。
-- **`error` 级 findings 可以带理由豁免**。这偏离了「错误无条件阻断」的直觉说法，
-  但那是能用的版本：否则一条误报的规则就永远绕不过去。
-  豁免必须逐一给出理由，且会写进审计流水与交付清单。
-- **对话里的工具只读**。写操作、豁免、提交审批、放行一律不在白名单里
-  （`lib/sdk/tools.ts`）。这是刻意的：让 AI 直接放行，「放行时刻重新计算规则」
-  这条闸门就变成了摆设。
-- **工具调用不做逐字动画**。参数是 JSON，服务端攒齐了才发 ——
-  把半截 JSON 推给界面只能逼它去容错一串解析不了的东西。
-- **非流式请求不带工具**。工具循环的意义是把中间过程推给用户看，而那正是流式才有的能力。
-- **聊天客户端的模型列表向接口拉取，但上下文窗口只有 Anthropic 给得了**。
-  OpenAI 兼容的 `/v1/models` 只返回模型 id，所以那些模型的 token 计量条显示
-  「上下文窗口未知」而不是编一个数出来。见下节。
-
----
-
-## 聊天客户端：Provider 与模型列表
-
-支持的 Provider：**Anthropic / OpenAI / DeepSeek / 自定义 Provider**。
-
-模型列表**不再硬编码**，改为向 provider 的 `GET /v1/models` 拉取（经 `/api/models` 代理，
-原因同 `/api/chat`：api.openai.com 与 api.deepseek.com 都不返回宽松的 CORS 头）。
-填完 API Key 会自动拉取，也可以手动刷新；结果在会话内缓存。
-
-拉取失败**不阻断**：已保存的列表仍然可用，也仍然可以手工添加模型。
-防火墙内、或网关不支持 `/models` 的场景必须还能配置。
-
-### 接口能给的东西不对等
-
-| | Anthropic | OpenAI / DeepSeek / 兼容网关 |
-|---|---|---|
-| 模型 id | ✅ | ✅ |
-| 显示名 | ✅ | ❌ |
-| 上下文窗口 | ✅ `max_input_tokens` | ❌ |
-| 输出上限 | ✅ `max_tokens` | ❌ |
-| 定价 | ❌ | ❌ |
-
-拉取解决的是**列表**，不解决**元数据**。所以 OpenAI / DeepSeek 的模型查不到上下文窗口时，
-计量条会如实显示「上下文窗口未知」并隐藏进度条 —— 一个凭空的窗口会让人以为还有余量，
-比不显示更危险。
-
-### 在设置里编辑 provider 时
-
-接口返回的模型**不会自动覆盖**你已保存的列表。它会作为独立区块显示（「Provider 返回 N 个模型」），
-你可以逐条添加，或点「全部替换为返回结果」。静默替换一份手工编过的列表是数据丢失。
-
-### 旧配置迁移
-
-`openrouter` / `qwen` / `ollama` 三个预设已删除。如果你之前配过它们，启动时会自动改写为
-OpenAI 兼容条目（保留 Key 与接口地址，名称标注「已并入自定义 Provider」），
-不需要重新配置。`localStorage` 里的配置会带上 `version` 字段，迁移只跑一次。
-
----
-
-## 聊天客户端 × 实施平台
-
-对话界面也是一个 AI 客户端 —— 只是它跑在同进程里，而不是通过 stdio/HTTP 连进来。
-
-```
-浏览器
-  └─ chat.tsx ──→ /api/chat ──→ handleChatRequest（工具循环在这里）
-                                   │
-                                   ├─ 第一轮：模型要调工具
-                                   ├─ 进程内 MCP Client ←→ McpServer（同一套 lib/mcp）
-                                   ├─ 执行、把结果塞回 messages
-                                   └─ 第二轮：模型作答
-   ←────────── SSE：text / tool / tool_result item ──────────┘
+```text
+components/chat.tsx
+  -> app/api/chat/route.ts
+  -> lib/sdk/server.ts
+  -> lib/harness/runtime.ts
+  -> lib/sdk/tools.ts
+  -> lib/mcp/server.ts
+  -> lib/mcp/tools/*
+  -> lib/core/ops/*
+  -> lib/core/store/*
 ```
 
-**复用的是同一套工具定义**（`lib/mcp/server.ts` 装配的那 36 个），经
-`InMemoryTransport` 进程内连接，而不是在浏览器里再写一个 MCP 客户端
-（理由见 `lib/sdk/tools.ts` 的文件头）。所以工具行为与审计不会在不同通道间漂移。
+### HTTP MCP
 
-### 白名单是显式的
+```text
+app/api/mcp/route.ts
+  -> lib/mcp/server.ts
+  -> lib/mcp/tools/*
+  -> lib/core/ops/*
+  -> lib/core/store/*
+```
 
-`lib/sdk/tools.ts` 里逐条列出对话可用的 20 个工具，**不**从上游的
-`readOnlyHint` 注解推导 —— 给对话新增一个工具应当是深思熟虑的动作。
-不在表里的工具，模型既看不到、也调不动（`callTool` 里另有一层拦截，
-因为参数是模型给的，不能假设它只点名自己见过的工具）。
+### 项目交付
 
-审计里这些调用记成 `chat-ui（AI·对话）`，与 Claude Code 的 `mcp-stdio` 调用可分。
+```text
+创建项目
+  -> 渲染能力包模板
+  -> 执行规则
+  -> 整改并重跑
+  -> 提交审批
+  -> 放行
+  -> 导出已发布资产
+```
 
-### 上下文裁剪会修工具配对
+## 依赖边界
 
-倒着裁历史时，`role:"tool"` 的消息比它的 assistant 新，会先被收进来。
-预算正好卡在两者之间就会留下一条孤立的工具结果，provider 直接 400，
-而错误信息只会说「tool_result 没有对应的 tool_use」，看不出根因是裁剪。
-`trimMessagesToContextWindow` 因此多了一步 `repairToolPairing`。
+推荐依赖方向：
+
+```text
+app -> sdk -> harness
+app -> mcp -> core
+mcp -> rules -> core
+capabilities -> rules
+```
+
+必须遵守的结构规则：
+
+- 领域动作只在 `lib/core/ops` 实现。
+- `lib/core/store` 只做存储，不实现业务规则。
+- `lib/mcp/tools` 只是 `lib/core/ops` 的协议适配层。
+- `lib/harness` 不依赖 Ditto 领域类型或 MCP。
+- 所有使用 `node:fs` 的模块只能被服务端代码导入。
+- 客户端组件只能导入类型和浏览器安全模块。
+
+## 常用命令
+
+```bash
+npm run dev
+npm run build
+npm run typecheck
+npm run workspace:init
+npm run workspace:smoke
+npm run core:smoke
+npm run harness:smoke
+npm run models:smoke
+npm run chat-tools:smoke
+npm run mcp:smoke
+npm run race:test
+```
+
+`mcp:smoke` 需要先启动 Web 服务，并默认访问 `http://localhost:3000/api/mcp`。
+
+## 环境变量
+
+| 变量 | 用途 |
+|---|---|
+| `DITTO_WORKSPACE` | 指定工作区根目录。 |
+| `DITTO_WORKSPACE_REGISTRY` | 覆盖 Web 工作区注册表文件位置。 |
+| `DITTO_HARNESS_MAX_ROUNDS` | Harness 最大模型轮数。 |
+| `DITTO_HARNESS_TOOL_TIMEOUT_MS` | 单个工具执行超时。 |
+| `DITTO_HARNESS_RUN_TIMEOUT_MS` | 单次 Harness 运行超时。 |
+| `DITTO_MCP_TOKENS` | HTTP MCP 的记名 token 表，不构成认证。 |
+
+## 修改代码时去哪里
+
+| 需求 | 主要目录 |
+|---|---|
+| 修改 Agent 循环、工具权限或审批 | `lib/harness/` |
+| 接入新的模型协议 | `lib/sdk/` |
+| 修改聊天页面或 Provider 设置 | `app/`、`components/` |
+| 修改工作区选择或路径校验 | `app/api/workspaces/`、`lib/core/store/workspace-registry.ts`、`components/workspace-switcher.tsx` |
+| 修改项目、资产、审批业务逻辑 | `lib/core/ops/` |
+| 修改磁盘格式或并发保护 | `lib/core/store/` |
+| 修改质量规则 | `lib/rules/`、`workspace/rulepacks/` |
+| 新增平台能力包或模板 | `lib/capabilities/`、`workspace/capabilities/` |
+| 修改 Web 对外工具 | `lib/mcp/tools/` |
+| 增加测试 | `scripts/` |
+
+## 当前边界
+
+- 只支持 Web 运行形态，不提供 stdio MCP。
+- 本机目录选择要求 Web 服务与用户在同一台机器上。
+- Web UI 只移除工作区绑定，不提供删除磁盘目录的操作。
+- Web MCP 无状态，每个请求创建独立服务端实例。
+- 操作者身份是自报字段，用于审计留痕，不是鉴权。
+- YAML 资产目前只支持通用内容和大小检查，不解析结构。
+- Web 聊天中的工具是显式白名单，默认不允许写操作和审批。

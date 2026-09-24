@@ -9,7 +9,7 @@ import { handleChatRequest, ChatRequest } from "@/lib/sdk/server";
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json() as ChatRequest;
-    return await handleChatRequest(body);
+    return await handleChatRequest(body, { signal: request.signal });
   } catch (error) {
     console.error("Chat API error:", error);
     return new Response(JSON.stringify({ error: (error as Error).message }), {

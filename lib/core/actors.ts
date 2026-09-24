@@ -32,14 +32,13 @@ export function localActor(name?: string): Actor {
 
 /**
  * MCP 操作者：由 initialize 的 clientInfo 推导。
- * via 区分 stdio / http / chat，便于审计里看出是哪个通道来的。
+ * via 区分 http / chat，便于审计里看出是哪个 Web 通道来的。
  *
- * `via: "chat"` 是本平台自己那个对话界面 —— 它也是一个 AI 客户端，
- * 只是跑在同进程里而不是通过 stdio/HTTP 连进来。
+ * `via: "chat"` 是 Web 内的对话界面；`via: "mcp-http"` 是 Web MCP 入口。
  */
 export function mcpActor(
   clientInfo: { name?: string; version?: string } | undefined,
-  via: "mcp-stdio" | "mcp-http" | "chat",
+  via: "mcp-http" | "chat",
   tokenActorId?: string
 ): Actor {
   const clientName = clientInfo?.name?.trim() || "unknown-client";
@@ -71,10 +70,9 @@ export function mcpActor(
  * 用 Record 而不是嵌套三元：两侧都是闭合联合，少写一个取值
  * 编译器就会在这里报错，而不是悄悄落进最后的 else。
  * 导出是给 UI 用的 —— 审计表格要按列拆分渲染，用不了 describeActor
- * 那个整串，但同样不该把 "mcp-stdio" / "chat" 这种内部取值直接摆给用户看。
+ * 那个整串，但同样不该把 "mcp-http" / "chat" 这种内部取值直接摆给用户看。
  */
 export const VIA_LABELS: Record<ActorVia, string> = {
-  "mcp-stdio": "MCP stdio",
   "mcp-http": "MCP HTTP",
   chat: "对话",
   cli: "命令行",

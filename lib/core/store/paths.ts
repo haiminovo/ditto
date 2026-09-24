@@ -23,8 +23,8 @@ export const WORKSPACE_ENV = "DITTO_WORKSPACE";
  *   2. 从 cwd 向上查找含 workspace/ditto.workspace.json 的目录
  *   3. <cwd>/workspace
  *
- * cwd 依赖是 stdio MCP 服务端的头号运维坑：claude mcp add 会用 Claude Code
- * 会话自己的 cwd 启动服务端。所以第二步的祖先标记搜索是必要的兜底。
+ * Web 服务可能从仓库子目录或不同进程 cwd 启动，所以第二步的祖先标记
+ * 搜索是必要的兜底。
  */
 export function resolveWorkspaceRoot(
   env: NodeJS.ProcessEnv = process.env,

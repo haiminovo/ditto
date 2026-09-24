@@ -1,22 +1,16 @@
 /**
  * Ditto 实施平台 - MCP 端到端冒烟
  *
- * 以**真实 MCP 客户端**的身份驱动服务端，走完整个交付生命周期。
- * 全程只经由 MCP 协议，不直接调用 lib/core —— 这样验证的才是
- * 「AI 客户端能不能真的把这件事做完」。
+ * 以真实 Web MCP 客户端的身份驱动服务端，走完整个交付生命周期。
+ * 全程只经由 HTTP MCP 协议，不直接调用 lib/core。
  *
- *   npm run mcp:smoke                                  # stdio
- *   npm run mcp:smoke:http -- --http http://localhost:3000/api/mcp
+ *   npm run dev
+ *   npm run mcp:smoke
  *
  * 任一断言失败即退出码 1，可直接进 CI。
  */
 
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 /* ------------------------------------------------------------------ */
@@ -65,33 +59,18 @@ interface TextResult {
 async function main() {
   const args = process.argv.slice(2);
   const httpIndex = args.indexOf("--http");
-  const httpUrl = httpIndex >= 0 ? args[httpIndex + 1] : undefined;
+  const httpUrl =
+    (httpIndex >= 0 ? args[httpIndex + 1] : undefined) ??
+    process.env.DITTO_MCP_URL ??
+    "http://localhost:3000/api/mcp";
 
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ditto-mcp-smoke-"));
-  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-
-  console.log(`模式：${httpUrl ? `HTTP（${httpUrl}）` : "stdio"}`);
-  console.log(`临时工作区：${root}`);
+  console.log(`Web MCP：${httpUrl}`);
 
   const client = new Client({ name: "ditto-smoke", version: "1.0.0" });
-
-  if (httpUrl) {
-    const transport = new StreamableHTTPClientTransport(new URL(httpUrl), {
-      requestInit: { headers: { Authorization: "Bearer smoke" } },
-    });
-    await client.connect(transport);
-  } else {
-    const transport = new StdioClientTransport({
-      command: path.join(repoRoot, "node_modules/.bin/tsx"),
-      args: [path.join(repoRoot, "mcp/stdio.ts")],
-      env: {
-        ...process.env,
-        DITTO_WORKSPACE: root,
-        DITTO_CLIENT_NAME: "ditto-smoke",
-      } as Record<string, string>,
-    });
-    await client.connect(transport);
-  }
+  const transport = new StreamableHTTPClientTransport(new URL(httpUrl), {
+    requestInit: { headers: { Authorization: "Bearer smoke" } },
+  });
+  await client.connect(transport);
 
   /** 调用工具并取回文本 */
   const call = async (name: string, toolArgs: Record<string, unknown> = {}): Promise<TextResult> => {
@@ -503,7 +482,7 @@ async function main() {
     /* ---------------------------------------------------------------- */
     console.log(`\n${"═".repeat(62)}`);
     console.log(failed === 0 ? `全部通过（${passed} 项断言）` : `${failed} 项失败`);
-    console.log(`临时工作区：${root}`);
+    console.log(`Web MCP：${httpUrl}`);
   } finally {
     await client.close().catch(() => undefined);
   }

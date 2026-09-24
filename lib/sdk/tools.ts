@@ -1,9 +1,8 @@
 /**
- * 聊天 ↔ 实施平台：进程内 MCP 桥接
+ * Ditto MCP ToolSource：聊天 ↔ 实施平台进程内桥接
  *
- * 这个文件让对话里的模型能调用实施平台的工具，而**不新增第四个 ops 薄壳**：
- * 它连的是同一套 lib/mcp 服务端（createMcpServer），所以工具行为、审计发射
- * 与 stdio / HTTP 两个入口完全一致 —— 三个入口都只做适配，不另写业务逻辑。
+ * 通用 harness 只认识 HarnessToolSource；这个适配器把它连到同一套 lib/mcp
+ * 服务端（createMcpServer），所以 Web 聊天与 HTTP MCP 的工具行为、审计发射一致。
  *
  * ⚠️ 本文件是**服务端专用**：它 import 了 lib/mcp/server.ts，而后者经
  *    lib/core/store/paths 依赖 node:fs。所以它**绝不能**出现在
@@ -22,6 +21,12 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Actor } from "../core/types";
 import { createMcpServer } from "../mcp/server";
 import { resolveWorkspaceRoot } from "../core/store/paths";
+import type {
+  HarnessToolContext,
+  HarnessToolDefinition,
+  HarnessToolResult,
+  HarnessToolSource,
+} from "../harness/types";
 
 /**
  * 对话界面**被允许**调用的工具。
@@ -68,21 +73,12 @@ export const CHAT_TOOL_ALLOWLIST: readonly string[] = [
 ];
 
 /** 归一化后的工具定义，交给各 provider 转成自己的格式 */
-export interface ProviderTool {
-  name: string;
-  description: string;
-  /** JSON Schema。已是 MCP 那边的原始形态，只需剥掉 provider 不认的键 */
-  inputSchema: Record<string, unknown>;
-}
+export type ProviderTool = HarnessToolDefinition;
+export type ToolCallOutcome = HarnessToolResult;
 
-export interface ToolCallOutcome {
-  text: string;
-  isError: boolean;
-}
-
-export interface ToolBridge {
-  listTools(): Promise<ProviderTool[]>;
-  callTool(name: string, args: Record<string, unknown>): Promise<ToolCallOutcome>;
+/** Ditto MCP 工具源；同时实现通用 harness 的 ToolSource 契约。 */
+export interface ToolBridge extends HarnessToolSource {
+  id: "ditto-mcp";
   close(): Promise<void>;
 }
 
@@ -133,8 +129,12 @@ export async function createToolBridge(
   await client.connect(clientTransport);
 
   return {
-    async listTools(): Promise<ProviderTool[]> {
+    id: "ditto-mcp" as const,
+
+    async listTools(signal?: AbortSignal): Promise<ProviderTool[]> {
+      signal?.throwIfAborted();
       const { tools } = await client.listTools();
+      signal?.throwIfAborted();
 
       return tools
         .filter((t) => isAllowed(t.name))
@@ -142,10 +142,16 @@ export async function createToolBridge(
           name: t.name,
           description: t.description ?? "",
           inputSchema: sanitizeSchema(t.inputSchema as Record<string, unknown>),
+          annotations: t.annotations as Record<string, unknown> | undefined,
         }));
     },
 
-    async callTool(name: string, args: Record<string, unknown>): Promise<ToolCallOutcome> {
+    async callTool(
+      name: string,
+      args: Record<string, unknown>,
+      context?: HarnessToolContext
+    ): Promise<ToolCallOutcome> {
+      context?.signal?.throwIfAborted();
       // 纵深防御：模型只会看到白名单内的工具，但参数是模型给的，
       // 不能假设它只会点名见过的工具
       if (!isAllowed(name)) {
@@ -159,6 +165,7 @@ export async function createToolBridge(
         content?: Array<{ type: string; text?: string }>;
         isError?: boolean;
       };
+      context?.signal?.throwIfAborted();
 
       // lib/mcp/result.ts 的约定：业务错误以 isError 返回，不抛异常
       // （抛出去会变成 JSON-RPC 协议错误，把 E_GATE_BLOCKED 这类可操作

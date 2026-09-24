@@ -109,7 +109,8 @@ export class BrowserModel implements ChatModel {
         modelName: this.model,
         providerConfig: this.providerConfig,
         messages,
-        options,
+        options: options ? { ...options, workspaceId: undefined } : options,
+        workspaceId: options?.workspaceId,
         stream: false,
       }),
     });
@@ -135,10 +136,13 @@ export class BrowserModel implements ChatModel {
         modelName: this.model,
         providerConfig: this.providerConfig,
         messages,
-        // enableTools 提到顶层：它是本平台的开关，不是要给模型 API 的参数，
+        // enableTools 提到顶层：它是 harness 的开关，不是要给模型 API 的参数，
         // 混在 options 里会被 server 当 provider 参数透传出去
-        options: options ? { ...options, enableTools: undefined } : options,
+        options: options
+          ? { ...options, enableTools: undefined, workspaceId: undefined }
+          : options,
         enableTools: options?.enableTools,
+        workspaceId: options?.workspaceId,
         stream: true,
       }),
     });

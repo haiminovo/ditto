@@ -4,8 +4,8 @@
  * 两层：
  *   1. 进程内 async mutex —— 按 key 链式排队，防止 Next route handler
  *      并发请求互相覆盖。
- *   2. 跨进程 mkdir 锁 —— `next dev` 与 Claude Code 拉起的 stdio MCP 服务端
- *      会同时写同一个工作区。mkdir 是原子的、全平台可用、零依赖。
+ *   2. 跨进程 mkdir 锁 —— 多个 Web/脚本进程可能同时写同一个工作区。
+ *      mkdir 是原子的、全平台可用、零依赖。
  *
  * ⚠️ 使用 node:fs，只能在服务端使用。
  */

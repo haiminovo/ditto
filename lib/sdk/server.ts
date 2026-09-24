@@ -25,8 +25,23 @@ import {
   toSSE,
   StreamEvent,
 } from "./protocol";
-import { createToolBridge, type ProviderTool, type ToolBridge } from "./tools";
+import {
+  createToolBridge,
+  CHAT_TOOL_ALLOWLIST,
+  type ProviderTool,
+  type ToolBridge,
+} from "./tools";
 import { mcpActor } from "../core/actors";
+import { resolveWorkspaceRootById } from "../core/store/workspace-registry";
+import {
+  createAllowlistPolicy,
+  runHarness,
+  type HarnessErrorCode,
+  type HarnessModelAdapter,
+  type HarnessModelRoundEvent,
+  type HarnessModelRoundInput,
+  type HarnessRunEvent,
+} from "../harness";
 
 export interface ChatRequest {
   provider: string;
@@ -35,8 +50,21 @@ export interface ChatRequest {
   messages: Message[];
   options?: LLMOptions;
   stream: boolean;
-  /** 是否给模型挂实施平台的工具。省略视为 true；见 llm.ts 里 BrowserModel 的传参 */
+  /** 是否给模型挂当前 harness profile 的工具。省略视为 true。 */
   enableTools?: boolean;
+  /** 当前聊天使用的工作区 id。 */
+  workspaceId?: string;
+  /** 单次运行的 harness 覆盖项。 */
+  harness?: {
+    maxRounds?: number;
+    toolTimeoutMs?: number;
+    runTimeoutMs?: number;
+  };
+}
+
+export interface ChatRequestContext {
+  signal?: AbortSignal;
+  sessionId?: string;
 }
 
 /**
@@ -52,14 +80,6 @@ const MAX_TOOL_ROUNDS = 6;
 const FLUSH_CHARS = 50;
 /** 或者攒多久 */
 const FLUSH_MS = 50;
-
-/** 一轮 provider 调用的产出 */
-interface RoundOutcome {
-  text: string;
-  toolCalls: ToolCall[];
-  /** provider 给的结束原因；null 表示这一轮没读到 */
-  stopReason: string | null;
-}
 
 /* ------------------------------------------------------------------ */
 /* 模型列表                                                            */
@@ -477,28 +497,66 @@ function toOpenAITools(tools: ProviderTool[]): OpenAI.ChatCompletionTool[] {
   }));
 }
 
-/** 两家 provider 表达「我在等工具结果」的 stop_reason 取值 */
-function isToolStop(stopReason: string | null): boolean {
-  return stopReason === "tool_use" || stopReason === "tool_calls";
+function positiveInt(value: unknown, fallback: number): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
-/** 模型给的参数是 JSON 字符串，解析失败要如实回给模型，而不是抛掉 */
-function parseToolArgs(raw: string): { args: Record<string, unknown> } | { parseError: string } {
-  const trimmed = raw.trim();
-  if (!trimmed) return { args: {} };
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { parseError: `参数必须是一个 JSON 对象，实际是 ${Array.isArray(parsed) ? "数组" : typeof parsed}` };
-    }
-    return { args: parsed as Record<string, unknown> };
-  } catch (e) {
-    return { parseError: e instanceof Error ? e.message : String(e) };
-  }
+function harnessNumber(
+  requestValue: number | undefined,
+  envName: string,
+  fallback: number
+): number {
+  return positiveInt(requestValue ?? process.env[envName], fallback);
 }
 
-export async function handleChatRequest(request: ChatRequest): Promise<Response> {
-  const { provider, modelName, providerConfig, messages, options, stream, enableTools } = request;
+function mapHarnessErrorCode(
+  code: HarnessErrorCode
+): "TIMEOUT" | "MODEL_ERROR" | "CANCELLED" | "UNKNOWN" {
+  if (code === "RUN_CANCELLED") return "CANCELLED";
+  if (code === "MODEL_ERROR" || code === "TOOL_ERROR") return "MODEL_ERROR";
+  return "UNKNOWN";
+}
+
+function createModelAdapter(
+  modelId: string,
+  isAnthropic: boolean,
+  modelName: string,
+  baseURL: string,
+  apiKey: string
+): HarnessModelAdapter {
+  return {
+    id: modelId,
+    streamRound(input) {
+      return isAnthropic
+        ? runAnthropicRound(modelName, baseURL, apiKey, input)
+        : runOpenAICompatibleRound(modelName, baseURL, apiKey, input);
+    },
+  };
+}
+
+/**
+ * Run one agent turn through the provider-neutral harness.
+ *
+ * Streaming and non-streaming callers share the same tool loop, policy checks,
+ * cancellation path and run events. The HTTP transport only decides how those
+ * events are serialized.
+ */
+export async function handleChatRequest(
+  request: ChatRequest,
+  context: ChatRequestContext = {}
+): Promise<Response> {
+  const {
+    provider,
+    modelName,
+    providerConfig,
+    messages,
+    options,
+    stream,
+    enableTools,
+    workspaceId,
+    harness,
+  } = request;
   const providerType = getProviderType(provider, providerConfig);
   const baseURL = getBaseURL(provider, providerConfig);
   const apiKey = providerConfig.apiKey || "";
@@ -510,22 +568,24 @@ export async function handleChatRequest(request: ChatRequest): Promise<Response>
     });
   }
 
-  const isAnthropic = providerType === "anthropic" || providerType === "claude";
-
-  // 非流式路径不带工具：工具循环的意义在于把中间过程推给用户看，
-  // 而这正是流式才有的能力。模型拿不到工具，也就不会要求调工具。
-  if (!stream) {
-    const registry = getDefaultRegistry();
-    const modelEntry = registry.resolve(modelName);
-    const trimmed =
-      modelEntry && messages.length
-        ? trimMessagesToContextWindow(messages, modelEntry, modelEntry.maxTokens)
-        : messages;
-
-    return isAnthropic
-      ? handleAnthropicRequest(modelName, baseURL, apiKey, trimmed, options)
-      : handleOpenAICompatibleRequest(modelName, baseURL, apiKey, trimmed, options);
+  let workspaceRoot: string | undefined;
+  if (workspaceId) {
+    try {
+      workspaceRoot = resolveWorkspaceRootById(workspaceId);
+    } catch (error) {
+      return new Response(
+        JSON.stringify({
+          error: error instanceof Error ? error.message : String(error),
+        }),
+        {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
   }
+
+  const isAnthropic = providerType === "anthropic" || providerType === "claude";
 
   // 桥接层要**赶在裁剪之前**建好：工具定义本身也占输入 token，
   // 不先把它们算出来，裁剪就会按「没有工具」的预算放行 —— 加上工具后
@@ -538,17 +598,18 @@ export async function handleChatRequest(request: ChatRequest): Promise<Response>
       // 对话界面以 AI 身份记账：动作确实是模型决定执行的，
       // 记成人会让审计分不清一次写入是人点的还是模型自己调的工具
       bridge = await createToolBridge(
-        mcpActor({ name: "chat-ui", version: "0.1.0" }, "chat")
+        mcpActor({ name: "chat-ui", version: "0.1.0" }, "chat"),
+        workspaceRoot ? { root: workspaceRoot } : undefined
       );
-      tools = await bridge.listTools();
+      tools = await bridge.listTools(context.signal);
     }
   } catch (error) {
     // 建不起来就如实退回无工具的对话，而不是整个请求失败 ——
-    // 实施平台没配好不该连聊天都用不了
+    // 工具源没配好不该连聊天都用不了
     if (bridge) await bridge.close().catch(() => undefined);
     bridge = null;
     tools = [];
-    console.error("实施平台工具不可用，本次对话不带工具:", error);
+    console.error("工具源不可用，本次对话不带工具:", error);
   }
 
   const registry = getDefaultRegistry();
@@ -569,85 +630,81 @@ export async function handleChatRequest(request: ChatRequest): Promise<Response>
     }
   }
 
+  const run = runHarness({
+    sessionId: context.sessionId,
+    messages: processedMessages,
+    model: createModelAdapter(
+      `${provider}/${modelName}`,
+      isAnthropic,
+      modelName,
+      baseURL,
+      apiKey
+    ),
+    modelOptions: options,
+    tools,
+    toolSource: bridge,
+    toolPolicy: createAllowlistPolicy(CHAT_TOOL_ALLOWLIST, {
+      reason: "工具不在当前对话 harness profile 的允许列表内。",
+    }),
+    maxRounds: harnessNumber(
+      harness?.maxRounds,
+      "DITTO_HARNESS_MAX_ROUNDS",
+      MAX_TOOL_ROUNDS
+    ),
+    toolTimeoutMs: harnessNumber(
+      harness?.toolTimeoutMs,
+      "DITTO_HARNESS_TOOL_TIMEOUT_MS",
+      60_000
+    ),
+    runTimeoutMs:
+      harness?.runTimeoutMs ??
+      (process.env.DITTO_HARNESS_RUN_TIMEOUT_MS
+        ? positiveInt(process.env.DITTO_HARNESS_RUN_TIMEOUT_MS, 0)
+        : undefined),
+    signal: context.signal,
+  });
+
+  if (!stream) {
+    let content = "";
+    let error: string | null = null;
+
+    try {
+      for await (const event of run) {
+        if (event.type === "text_delta") content += event.text;
+        if (event.type === "warning") {
+          console.warn(`[harness:${event.code}] ${event.message}`);
+        }
+        if (event.type === "error") error = event.message;
+        if (event.type === "run_end" && event.reason === "round_limit") {
+          content += `\n\n（已达到工具调用轮数上限，我先停下来。）`;
+        }
+      }
+    } finally {
+      if (bridge) await bridge.close().catch(() => undefined);
+    }
+
+    if (error) {
+      return new Response(JSON.stringify({ error }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    return new Response(JSON.stringify({ content }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
   const streamId = `stream_${Date.now()}`;
   const activeBridge = bridge;
-  const activeTools = tools;
 
   const readable = new ReadableStream<Uint8Array>({
     async start(controller) {
       const writer = new StreamWriter(controller, streamId);
 
       try {
-        let convo = processedMessages;
-
-        for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
-          const outcome = isAnthropic
-            ? await runAnthropicRound(modelName, baseURL, apiKey, convo, options ?? {}, activeTools, writer)
-            : await runOpenAICompatibleRound(modelName, baseURL, apiKey, convo, options ?? {}, activeTools, writer);
-
-          writer.endTextItem();
-
-          if (outcome.toolCalls.length === 0) {
-            // provider 说要调工具，却一个都没攒出来 —— 流被截断了。
-            // 不吭声的话，用户只会看到一段莫名其妙断掉的话。
-            if (isToolStop(outcome.stopReason)) {
-              writer.writeError(
-                "MODEL_ERROR",
-                `模型要求调用工具，但没收到完整的调用信息（stop_reason=${outcome.stopReason}）`
-              );
-            }
-            break;
-          }
-
-          if (round === MAX_TOOL_ROUNDS - 1) {
-            // 最后一轮还是要求调工具：不能再转了，但要让用户知道为什么停
-            for (const call of outcome.toolCalls) {
-              writer.writeToolCall(call);
-              writer.writeToolResult(
-                call.id,
-                `【E_ROUND_LIMIT】已达到工具调用轮数上限（${MAX_TOOL_ROUNDS}），本次未执行。`,
-                true
-              );
-            }
-            writer.pushText(
-              `\n\n（已达到工具调用轮数上限 ${MAX_TOOL_ROUNDS}，我先停下来。可以把问题拆小一点再问。）`
-            );
-            break;
-          }
-
-          const assistantMsg: Message = {
-            role: "assistant",
-            content: outcome.text,
-            toolCalls: outcome.toolCalls,
-          };
-          const toolMsgs: Message[] = [];
-
-          for (const call of outcome.toolCalls) {
-            writer.writeToolCall(call);
-
-            const parsed = parseToolArgs(call.arguments);
-            const result =
-              "parseError" in parsed
-                ? {
-                    text: `【E_TOOL_ARGS】参数不是合法 JSON，无法执行：${parsed.parseError}\n收到的原文：${call.arguments.slice(0, 500)}`,
-                    isError: true,
-                  }
-                : activeBridge
-                  ? await activeBridge.callTool(call.name, parsed.args)
-                  : {
-                      text: `【E_TOOL_UNAVAILABLE】工具通道未建立，${call.name} 未执行。`,
-                      isError: true,
-                    };
-
-            writer.writeToolResult(call.id, result.text, result.isError);
-            toolMsgs.push({
-              role: "tool",
-              toolCallId: call.id,
-              content: result.text,
-            });
-          }
-
-          convo = [...convo, assistantMsg, ...toolMsgs];
+        for await (const event of run) {
+          writeHarnessEvent(writer, event);
         }
       } catch (error) {
         // 流已经发出去了，HTTP 状态码改不动了 —— 只能作为流内错误事件告知
@@ -674,6 +731,52 @@ export async function handleChatRequest(request: ChatRequest): Promise<Response>
       "X-Accel-Buffering": "no",
     },
   });
+}
+
+function writeHarnessEvent(writer: StreamWriter, event: HarnessRunEvent): void {
+  switch (event.type) {
+    case "text_delta":
+      writer.pushText(event.text);
+      break;
+    case "round_end":
+      writer.endTextItem();
+      break;
+    case "tool_call":
+      writer.writeToolCall(event.call);
+      break;
+    case "tool_result":
+      writer.writeToolResult(event.call.id, event.result.text, event.result.isError);
+      break;
+    case "warning":
+      console.warn(`[harness:${event.code}] ${event.message}`);
+      break;
+    case "error":
+      writer.writeError(mapHarnessErrorCode(event.code), event.message);
+      break;
+    case "run_end":
+      if (event.reason === "round_limit") {
+        writer.pushText(
+          `\n\n（已达到工具调用轮数上限，我先停下来。可以把问题拆小一点再问。）`
+        );
+        writer.endTextItem();
+      }
+      break;
+  }
+}
+
+/** Rebuild a provider request from normalized tool-call arguments. */
+function parseToolArgs(raw: string): { args: Record<string, unknown> } | { parseError: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { args: {} };
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { parseError: "arguments must be a JSON object" };
+    }
+    return { args: parsed as Record<string, unknown> };
+  } catch (error) {
+    return { parseError: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 function convertMessagesForAnthropic(messages: Message[]): {
@@ -827,79 +930,36 @@ function convertMessagesForOpenAI(
 }
 
 /**
- * 非流式单轮。
+ * Anthropic 的单轮 harness adapter。
  *
- * 流式那条路整个搬去了 runAnthropicRound —— 它要在一个 ReadableStream 里
- * 被调用多次（工具循环），没法再自己建一个 Response 返回。
- * 非流式不带工具，理由见 handleChatRequest。
+ * 文本作为事件边到边交给 harness；工具调用攒齐后随 round_end 返回。
  */
-async function handleAnthropicRequest(
+async function* runAnthropicRound(
   modelName: string,
   baseURL: string,
   apiKey: string,
-  messages: Message[],
-  options: LLMOptions = {}
-): Promise<Response> {
-  const client = new Anthropic({
-    baseURL: baseURL || "https://api.anthropic.com",
-    apiKey: apiKey,
-  });
-
-  const { system, anthropicMessages } = convertMessagesForAnthropic(messages);
-
-  const response = await client.messages.create({
-    model: modelName,
-    messages: anthropicMessages,
-    system: system,
-    temperature: options.temperature ?? 0.7,
-    max_tokens: options.maxTokens ?? 8192,
-    top_p: options.topP,
-  });
-
-  let content = "";
-  for (const block of response.content) {
-    if (block.type === "text") {
-      content += block.text;
-    }
-  }
-
-  return new Response(JSON.stringify({ content }), {
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-/**
- * 一轮 Anthropic 流式调用。
- *
- * 文本边到边推给 writer；工具调用攒齐了作为返回值交出去
- * （参数要 JSON 完整才能执行，边流边执行是做不到的）。
- */
-async function runAnthropicRound(
-  modelName: string,
-  baseURL: string,
-  apiKey: string,
-  messages: Message[],
-  options: LLMOptions,
-  tools: ProviderTool[],
-  writer: StreamWriter
-): Promise<RoundOutcome> {
+  input: HarnessModelRoundInput
+): AsyncGenerator<HarnessModelRoundEvent> {
   const client = new Anthropic({
     baseURL: baseURL || "https://api.anthropic.com",
     apiKey,
   });
 
-  const { system, anthropicMessages } = convertMessagesForAnthropic(messages);
+  const { system, anthropicMessages } = convertMessagesForAnthropic(input.messages);
 
-  const stream = await client.messages.create({
-    model: modelName,
-    messages: anthropicMessages,
-    system,
-    temperature: options.temperature ?? 0.7,
-    max_tokens: options.maxTokens ?? 8192,
-    top_p: options.topP,
-    stream: true,
-    ...(tools.length ? { tools: toAnthropicTools(tools) } : {}),
-  });
+  const stream = await client.messages.create(
+    {
+      model: modelName,
+      messages: anthropicMessages,
+      system,
+      temperature: input.options?.temperature ?? 0.7,
+      max_tokens: input.options?.maxTokens ?? 8192,
+      top_p: input.options?.topP,
+      stream: true,
+      ...(input.tools.length ? { tools: toAnthropicTools(input.tools) } : {}),
+    },
+    { signal: input.signal }
+  );
 
   let text = "";
   let pending: { id: string; name: string; json: string } | null = null;
@@ -916,7 +976,7 @@ async function runAnthropicRound(
     } else if (chunk.type === "content_block_delta") {
       if (chunk.delta.type === "text_delta") {
         text += chunk.delta.text;
-        writer.pushText(chunk.delta.text);
+        yield { type: "text_delta", text: chunk.delta.text };
       } else if (chunk.delta.type === "input_json_delta" && pending) {
         // 参数是分片吐的，攒成一个串再解析
         pending.json += chunk.delta.partial_json;
@@ -933,60 +993,33 @@ async function runAnthropicRound(
     }
   }
 
-  return { text, toolCalls, stopReason };
+  yield { type: "round_end", text, toolCalls, stopReason };
 }
 
-/** 非流式单轮。同 handleAnthropicRequest 的说明。 */
-async function handleOpenAICompatibleRequest(
+/** OpenAI 兼容 provider 的单轮 harness adapter。DeepSeek 等走的也是这条路。 */
+async function* runOpenAICompatibleRound(
   modelName: string,
   baseURL: string,
   apiKey: string,
-  messages: Message[],
-  options: LLMOptions = {}
-): Promise<Response> {
-  const client = new OpenAI({
-    baseURL,
-    apiKey: apiKey,
-  });
-
-  const response = await client.chat.completions.create({
-    model: modelName,
-    messages: convertMessagesForOpenAI(messages),
-    temperature: options.temperature ?? 0.7,
-    max_tokens: options.maxTokens ?? 2048,
-    top_p: options.topP,
-  });
-
-  const content = response.choices[0]?.message?.content || "";
-  return new Response(JSON.stringify({ content }), {
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-/** 一轮 OpenAI 兼容流式调用。DeepSeek 等走的也是这条路。 */
-async function runOpenAICompatibleRound(
-  modelName: string,
-  baseURL: string,
-  apiKey: string,
-  messages: Message[],
-  options: LLMOptions,
-  tools: ProviderTool[],
-  writer: StreamWriter
-): Promise<RoundOutcome> {
+  input: HarnessModelRoundInput
+): AsyncGenerator<HarnessModelRoundEvent> {
   const client = new OpenAI({
     baseURL,
     apiKey,
   });
 
-  const stream = await client.chat.completions.create({
-    model: modelName,
-    messages: convertMessagesForOpenAI(messages),
-    temperature: options.temperature ?? 0.7,
-    max_tokens: options.maxTokens ?? 2048,
-    top_p: options.topP,
-    stream: true,
-    ...(tools.length ? { tools: toOpenAITools(tools) } : {}),
-  });
+  const stream = await client.chat.completions.create(
+    {
+      model: modelName,
+      messages: convertMessagesForOpenAI(input.messages),
+      temperature: input.options?.temperature ?? 0.7,
+      max_tokens: input.options?.maxTokens ?? 2048,
+      top_p: input.options?.topP,
+      stream: true,
+      ...(input.tools.length ? { tools: toOpenAITools(input.tools) } : {}),
+    },
+    { signal: input.signal }
+  );
 
   let text = "";
   let stopReason: string | null = null;
@@ -1001,7 +1034,7 @@ async function runOpenAICompatibleRound(
     const delta = choice.delta;
     if (delta?.content) {
       text += delta.content;
-      writer.pushText(delta.content);
+      yield { type: "text_delta", text: delta.content };
     }
 
     for (const piece of delta?.tool_calls ?? []) {
@@ -1023,5 +1056,5 @@ async function runOpenAICompatibleRound(
     .filter((c) => c.name)
     .map((c) => ({ id: c.id, name: c.name, arguments: c.json }));
 
-  return { text, toolCalls, stopReason };
+  yield { type: "round_end", text, toolCalls, stopReason };
 }
