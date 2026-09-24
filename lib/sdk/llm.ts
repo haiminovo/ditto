@@ -104,12 +104,15 @@ export class BrowserModel implements ChatModel {
     const response = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: options?.signal,
       body: JSON.stringify({
         provider: this.providerKey,
         modelName: this.model,
         providerConfig: this.providerConfig,
         messages,
-        options: options ? { ...options, workspaceId: undefined } : options,
+        options: options
+          ? { ...options, workspaceId: undefined, signal: undefined }
+          : options,
         workspaceId: options?.workspaceId,
         stream: false,
       }),
@@ -131,6 +134,7 @@ export class BrowserModel implements ChatModel {
     const response = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: options?.signal,
       body: JSON.stringify({
         provider: this.providerKey,
         modelName: this.model,
@@ -139,7 +143,12 @@ export class BrowserModel implements ChatModel {
         // enableTools 提到顶层：它是 harness 的开关，不是要给模型 API 的参数，
         // 混在 options 里会被 server 当 provider 参数透传出去
         options: options
-          ? { ...options, enableTools: undefined, workspaceId: undefined }
+          ? {
+              ...options,
+              enableTools: undefined,
+              workspaceId: undefined,
+              signal: undefined,
+            }
           : options,
         enableTools: options?.enableTools,
         workspaceId: options?.workspaceId,

@@ -89,6 +89,7 @@ workspace/              运行时数据，默认不纳入 git
 | `components/use-provider-models.ts` | 客户端 Hook。调用 `/api/models`、处理加载状态、缓存和手动模型列表。 |
 | `components/use-workspaces.ts` | 客户端 Hook。读取并管理工作区列表和当前选择。 |
 | `components/workspace-switcher.tsx` | 侧边栏工作区入口和选择弹窗。 |
+| `components/multi-model-setup.tsx` | 多模型讨论配置：参与者增删、顺序、发言次数和讨论主题。 |
 | `components/ui/*` | 基础 UI 组件，包括 Button、Card、Input、Select、Table、Textarea 和 Badge。 |
 
 `components/ui` 不应承载业务规则。领域状态和动作必须通过 API 或服务端操作层完成。
@@ -123,6 +124,7 @@ Provider 客户端和 Web 聊天服务端。
 | `lib/sdk/llm.ts` | 浏览器侧模型封装，负责把请求发到 `/api/chat`。 |
 | `lib/sdk/server.ts` | 服务端聊天处理。解析 Anthropic/OpenAI 兼容协议，并把单轮模型调用适配为 Harness。 |
 | `lib/sdk/tools.ts` | Ditto MCP ToolSource。创建进程内 MCP 客户端，并实施聊天工具白名单。 |
+| `lib/sdk/multi-model.ts` | 多模型讨论调度与参与者视角的消息构造。 |
 | `lib/sdk/registry.ts` | 模型元数据、Token 估算、上下文裁剪和工具消息配对修复。 |
 | `lib/sdk/protocol.ts` | SSE 流协议。定义 item 生命周期、工具调用、文本增量和客户端状态归并。 |
 | `lib/sdk/index.ts` | 浏览器可安全导入的 SDK 出口。 |
@@ -250,6 +252,7 @@ MCP 是领域能力的调用协议层，不承载业务逻辑。
 | `scripts/workspace-init.ts` | 初始化工作区并安装内置能力包。 |
 | `scripts/core-smoke.ts` | 领域层端到端测试，不经过 MCP。 |
 | `scripts/harness-smoke.ts` | 通用 Harness 测试，使用假模型和假工具。 |
+| `scripts/multi-model-smoke.ts` | 多模型轮转顺序和视角消息构造测试。 |
 | `scripts/chat-tools-smoke.ts` | Web 聊天、Harness、MCP ToolSource 和 SSE 的集成测试。 |
 | `scripts/mcp-smoke.ts` | 通过 HTTP MCP 驱动的端到端交付测试。 |
 | `scripts/models-smoke.ts` | Provider 模型列表、错误处理、超时和密钥脱敏测试。 |
@@ -289,6 +292,19 @@ workspace/
 Web 工作区选择保存在 `.ditto/workspaces.json`。该文件记录默认工作区和用户
 添加的本机目录，但不会把工作区内容复制进仓库。删除或移除工作区绑定不会删除
 磁盘目录。
+
+## 多模型讨论
+
+Web 聊天支持配置两个或更多模型参与同一场讨论。模型可以通过隐藏控制指令指定
+下一位发言者；未指定或指定无效时，按参与者列表顺序轮转。每次发言都能看到用户
+主题以及其他模型此前的全部发言。当前模型自己的历史输出作为 assistant 消息，
+其他模型的输出作为带署名的 user 消息。
+
+每个参与者都有独立实例 id，而不是用模型名充当身份，因此同一个 Provider/模型可以
+重复加入并分别设置角色名称与角色说明，例如“GPT-4o · 正方”和“GPT-4o · 反方”。
+
+讨论由客户端串行调度，不会让多个模型同时执行工具或写工作区。自动讨论期间工具
+被禁用；达到最大发言次数或点击停止后结束。结束后可以输入新话题，继续使用同一组模型。
 
 ## 主要调用链
 
@@ -358,6 +374,7 @@ npm run workspace:init
 npm run workspace:smoke
 npm run core:smoke
 npm run harness:smoke
+npm run multi-model:smoke
 npm run models:smoke
 npm run chat-tools:smoke
 npm run mcp:smoke
@@ -383,6 +400,7 @@ npm run race:test
 |---|---|
 | 修改 Agent 循环、工具权限或审批 | `lib/harness/` |
 | 接入新的模型协议 | `lib/sdk/` |
+| 修改多模型讨论顺序或上下文 | `lib/sdk/multi-model.ts`、`components/multi-model-setup.tsx` |
 | 修改聊天页面或 Provider 设置 | `app/`、`components/` |
 | 修改工作区选择或路径校验 | `app/api/workspaces/`、`lib/core/store/workspace-registry.ts`、`components/workspace-switcher.tsx` |
 | 修改项目、资产、审批业务逻辑 | `lib/core/ops/` |

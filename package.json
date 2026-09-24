@@ -11,13 +11,23 @@
     "workspace:smoke": "tsx scripts/workspace-smoke.ts",
     "core:smoke": "tsx scripts/core-smoke.ts",
     "harness:smoke": "tsx scripts/harness-smoke.ts",
+    "multi-model:smoke": "tsx scripts/multi-model-smoke.ts",
     "models:smoke": "tsx scripts/models-smoke.ts",
     "mcp:smoke": "tsx scripts/mcp-smoke.ts --http http://localhost:3000/api/mcp",
     "chat-tools:smoke": "tsx scripts/chat-tools-smoke.ts",
     "race:test": "tsx scripts/race-test.ts",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["llm", "ai", "agent", "harness", "anthropic", "openai", "mcp", "实施平台"],
+  "keywords": [
+    "llm",
+    "ai",
+    "agent",
+    "harness",
+    "anthropic",
+    "openai",
+    "mcp",
+    "实施平台"
+  ],
   "author": "",
   "license": "MIT",
   "engines": {
@@ -34,6 +44,7 @@
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.0.2",
     "zod": "^4.6.5"
   },

@@ -123,6 +123,8 @@ export interface LLMOptions {
    * ChatRequest 顶层，服务端再通过注册表解析真实路径。
    */
   workspaceId?: string;
+  /** 浏览器请求取消信号。只用于 fetch，不会发送给模型 API。 */
+  signal?: AbortSignal;
 }
 
 /**

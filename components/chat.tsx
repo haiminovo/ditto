@@ -26,8 +26,9 @@ import {
   Loader2,
   RefreshCw,
   X,
+  MessagesSquare,
+  Square,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
 import {
   Message as DittoMessage,
   PROVIDERS,
@@ -37,12 +38,30 @@ import {
   resolveProviderType,
   getDefaultRegistry,
   estimateMessagesTokens,
+  buildMultiModelMessages,
+  createModelFromConfig,
+  multiModelParticipantId,
+  multiModelParticipantAt,
+  multiModelParticipantTone,
+  nextMultiModelParticipant,
+  parseMultiModelNextSpeaker,
+  shouldRetryEmptyMultiModelReply,
+  visibleMultiModelContent,
+  type MultiModelConfig,
+  type MultiModelEntry,
+  type MultiModelParticipant,
 } from "@/lib/sdk";
 import { cn } from "@/components/ui/button";
 import { ToolCallCard, type UiToolCall } from "@/components/tool-call-card";
 import { useProviderModels } from "@/components/use-provider-models";
 import { useWorkspaces } from "@/components/use-workspaces";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
+import { MultiModelSetup } from "@/components/multi-model-setup";
+import {
+  PrivateChatPanel,
+  type PrivateChatPanelMessage,
+} from "@/components/private-chat-panel";
+import { MarkdownMessage } from "@/components/markdown-message";
 
 interface ChatImage {
   id: string;
@@ -58,6 +77,20 @@ interface ChatMessage {
   /** 这一轮助手调用了哪些工具 */
   toolCalls?: UiToolCall[];
   isStreaming?: boolean;
+  /** 多模型讨论中，这条发言来自哪个模型。 */
+  participant?: MultiModelParticipant;
+  nextParticipant?: MultiModelParticipant;
+  nextUser?: boolean;
+  nextReason?: string;
+  channel?: "public" | "private";
+  recipient?: MultiModelParticipant;
+  privateTopic?: string;
+}
+
+interface WaitingForUser {
+  requestedBy: MultiModelParticipant;
+  reason?: string;
+  remainingTurns: number;
 }
 
 interface ChatSession {
@@ -65,6 +98,9 @@ interface ChatSession {
   title: string;
   messages: ChatMessage[];
   createdAt: number;
+  multiModel?: MultiModelConfig;
+  waitingForUser?: WaitingForUser;
+  pendingNextParticipantId?: string;
 }
 
 /**
@@ -123,6 +159,48 @@ function toApiMessages(messages: ChatMessage[]): DittoMessage[] {
   });
 }
 
+function toMultiModelEntries(messages: ChatMessage[]): MultiModelEntry[] {
+  return messages
+    .filter(
+      (message): message is ChatMessage & { role: "user" | "assistant" } =>
+        message.role === "user" || message.role === "assistant"
+    )
+    .map((message) => ({
+      role: message.role,
+      content: message.content,
+      participantId: message.participant
+        ? multiModelParticipantId(message.participant)
+        : undefined,
+      channel: message.channel,
+      recipientId: message.recipient
+        ? multiModelParticipantId(message.recipient)
+        : undefined,
+    }));
+}
+
+function toPrivatePanelMessages(
+  messages: ChatMessage[]
+): PrivateChatPanelMessage[] {
+  const out: PrivateChatPanelMessage[] = [];
+  for (const message of messages) {
+    if (
+      message.channel !== "private" ||
+      !message.participant ||
+      !message.recipient
+    ) {
+      continue;
+    }
+    out.push({
+      id: message.id,
+      content: message.content,
+      sender: message.participant,
+      recipient: message.recipient,
+      topic: message.privateTopic,
+    });
+  }
+  return out;
+}
+
 export function ChatPage() {
   const [currentSessionId, setCurrentSessionId] = useState<string>("default");
   const [sessions, setSessions] = useState<Map<string, ChatSession>>(new Map([
@@ -132,15 +210,24 @@ export function ChatPage() {
   const [pendingImages, setPendingImages] = useState<ChatImage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showMultiModelSetup, setShowMultiModelSetup] = useState(false);
   // Harness 工具开关。存独立的键，不进 ditto:config —— 那是 provider 配置，
   // 有自己的结构版本与迁移逻辑，为这么一个开关动它不划算。
   const [enableTools, setEnableTools] = useState(true);
   const workspaces = useWorkspaces();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const multiModelAbortRef = useRef<AbortController | null>(null);
   const { sendMessage, currentModel, config, saveConfig, updateProvider, deleteProvider, isConfigured } = useApp();
 
   const currentSession = sessions.get(currentSessionId) || sessions.get("default")!;
+  const publicMessages = currentSession.messages.filter(
+    (message) => message.channel !== "private"
+  );
+  const privateMessages = currentSession.messages.filter(
+    (message) => message.channel === "private"
+  );
+  const privatePanelMessages = toPrivatePanelMessages(privateMessages);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -277,8 +364,259 @@ export function ChatPage() {
     setPendingImages(prev => prev.filter(img => img.id !== imageId));
   };
 
+  const runMultiModelDiscussion = async (
+    sessionId: string,
+    prompt: string,
+    multiModel: MultiModelConfig,
+    baseMessages: ChatMessage[] = [],
+    resume?: WaitingForUser,
+    initialParticipantId?: string
+  ) => {
+    const controller = new AbortController();
+    multiModelAbortRef.current = controller;
+    setIsStreaming(true);
+    const workspaceId = workspaces.active?.id;
+
+    const userMessage: ChatMessage = {
+      id: Date.now().toString(),
+      role: "user",
+      content: prompt,
+    };
+    let conversation = [...baseMessages, userMessage];
+
+    const commit = (messages: ChatMessage[]) => {
+      conversation = messages;
+      setSessions((previous) => {
+        const session = previous.get(sessionId);
+        if (!session) return previous;
+        return new Map(previous).set(sessionId, {
+          ...session,
+          multiModel,
+          waitingForUser: undefined,
+          pendingNextParticipantId: undefined,
+          title:
+            session.messages.length === 0
+              ? prompt.slice(0, 30) + (prompt.length > 30 ? "..." : "")
+              : session.title,
+          messages,
+        });
+      });
+    };
+
+    commit(conversation);
+
+    try {
+      let nextParticipantId: string | undefined =
+        initialParticipantId ?? resume?.requestedBy.id;
+      let selectedBy: MultiModelParticipant | undefined;
+      let selectionReason: string | undefined = resume?.reason;
+      let previousParticipantId: string | undefined;
+      const turnBudget = resume?.remainingTurns ?? multiModel.maxTurns;
+
+      for (let turn = 0; turn < turnBudget; turn += 1) {
+        if (controller.signal.aborted) break;
+
+        let participant =
+          (nextParticipantId
+            ? multiModel.participants.find(
+                (candidate) => candidate.id === nextParticipantId
+              )
+            : undefined) ?? multiModelParticipantAt(multiModel, turn);
+        if (
+          participant.id === previousParticipantId &&
+          multiModel.participants.length > 1
+        ) {
+          participant = nextMultiModelParticipant(multiModel, participant.id);
+        }
+        const assistantId = `${Date.now()}-${turn}`;
+        const placeholder: ChatMessage = {
+          id: assistantId,
+          role: "assistant",
+          content: "",
+          participant,
+          isStreaming: true,
+        };
+        commit([...conversation, placeholder]);
+
+        const providerConfig = config.providers[participant.provider];
+        if (!providerConfig?.apiKey) {
+          throw new Error(
+            `模型 ${participant.name} 缺少 Provider 配置`
+          );
+        }
+
+        const model = createModelFromConfig(
+          participant.provider,
+          participant.model,
+          providerConfig
+        );
+        const apiMessages = buildMultiModelMessages(
+          toMultiModelEntries(conversation.slice(0, -1)),
+          participant,
+          multiModel,
+          { selectedBy, reason: selectionReason }
+        );
+
+        const streamTurn = async (messages: typeof apiMessages) => {
+          let raw = "";
+          for await (const chunk of model.generateStream(messages, {
+            enableTools: false,
+            workspaceId,
+            signal: controller.signal,
+          })) {
+            if (chunk.type !== "text") continue;
+            raw += chunk.text;
+            const visibleContent = visibleMultiModelContent(raw);
+            commit(
+              conversation.map((message) =>
+                message.id === assistantId
+                  ? { ...message, content: visibleContent, isStreaming: true }
+                  : message
+              )
+            );
+          }
+          return raw;
+        };
+
+        let rawContent = await streamTurn(apiMessages);
+        let decision = parseMultiModelNextSpeaker(
+          rawContent,
+          multiModel,
+          participant.id
+        );
+        if (shouldRetryEmptyMultiModelReply(decision)) {
+          rawContent = await streamTurn([
+            ...apiMessages,
+            { role: "assistant", content: rawContent },
+            {
+              role: "user",
+              content:
+                "你刚才只输出了调度指令，没有提供公开正文。" +
+                "请重新回复：必须先给出面向所有参与者的正文，" +
+                "如果需要指定下一位，再在正文末尾输出一次控制指令。",
+            },
+          ]);
+          decision = parseMultiModelNextSpeaker(
+            rawContent,
+            multiModel,
+            participant.id
+          );
+        }
+
+        if (shouldRetryEmptyMultiModelReply(decision)) {
+          decision = {
+            content: "（本条未返回正文，已回退到下一位参与者）",
+            reason: undefined,
+            privateMessages: [],
+          };
+        }
+        const remainingTurns = Math.max(1, turnBudget - turn - 1);
+        const displayContent =
+          decision.content ||
+          (decision.privateMessages?.length
+            ? "（仅发送了私聊消息）"
+            : "（本条未返回正文）");
+        const nextParticipant =
+          decision.nextParticipant ??
+          nextMultiModelParticipant(multiModel, participant.id);
+        const finalized = conversation.map((message) =>
+          message.id === assistantId
+            ? {
+                ...message,
+                content: displayContent,
+                isStreaming: false,
+                channel: "public" as const,
+                nextUser: decision.nextUser,
+                nextParticipant: decision.nextUser ? undefined : nextParticipant,
+                nextReason: decision.reason,
+              }
+            : message
+        );
+        for (const [index, privateMessage] of (
+          decision.privateMessages ?? []
+        ).entries()) {
+          finalized.push({
+            id: `${assistantId}-private-${index}`,
+            role: "assistant",
+            content: privateMessage.content,
+            participant,
+            recipient: privateMessage.recipient,
+            privateTopic: privateMessage.topic,
+            channel: "private",
+          });
+        }
+        commit(finalized);
+
+        if (decision.nextUser) {
+          setSessions((previous) => {
+            const session = previous.get(sessionId);
+            if (!session) return previous;
+            return new Map(previous).set(sessionId, {
+              ...session,
+              waitingForUser: {
+                requestedBy: participant,
+                reason: decision.reason,
+                remainingTurns,
+              },
+            });
+          });
+          return;
+        }
+
+        nextParticipantId = nextParticipant.id;
+        selectedBy = participant;
+        selectionReason = decision.reason;
+        previousParticipantId = participant.id;
+      }
+    } catch (error) {
+      const aborted =
+        error instanceof DOMException
+          ? error.name === "AbortError"
+          : error instanceof Error && error.name === "AbortError";
+      const last = [...conversation]
+        .reverse()
+        .find((message) => message.role === "assistant" && message.isStreaming);
+      if (last) {
+        commit(
+          conversation.map((message) =>
+            message.id === last.id
+              ? {
+                  ...message,
+                  content:
+                    message.content +
+                    (aborted
+                      ? "\n\n（对话已停止）"
+                      : `\n\n错误：${(error as Error).message}`),
+                  isStreaming: false,
+                }
+              : message
+          )
+        );
+      }
+    } finally {
+      multiModelAbortRef.current = null;
+      setIsStreaming(false);
+    }
+  };
+
   const handleSend = async () => {
     if ((!input.trim() && pendingImages.length === 0) || isStreaming) return;
+
+    if (currentSession.multiModel) {
+      const prompt = input.trim();
+      if (!prompt) return;
+      setInput("");
+      setPendingImages([]);
+      await runMultiModelDiscussion(
+        currentSessionId,
+        prompt,
+        currentSession.multiModel,
+        currentSession.messages,
+        currentSession.waitingForUser,
+        currentSession.pendingNextParticipantId
+      );
+      return;
+    }
 
     const userMessageId = Date.now().toString();
     const assistantMessageId = (Date.now() + 1).toString();
@@ -433,6 +771,14 @@ export function ChatPage() {
             <Plus className="w-4 h-4" />
             新对话
           </Button>
+          <Button
+            variant="ghost"
+            className="mt-1 w-full justify-start gap-2"
+            onClick={() => setShowMultiModelSetup(true)}
+          >
+            <MessagesSquare className="w-4 h-4" />
+            多模型讨论
+          </Button>
         </div>
 
         <div className="flex flex-col gap-2 flex-1 overflow-y-auto px-2">
@@ -475,13 +821,18 @@ export function ChatPage() {
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col">
+      <div className="flex min-w-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
         <div className="border-b border-gray-200 dark:border-gray-800 p-4">
           <div className="max-w-3xl mx-auto">
             <div className="flex items-center justify-between">
               <div>
                 <h1 className="font-semibold text-lg">{currentSession.title}</h1>
-                {currentModel && (
+                {currentSession.multiModel ? (
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    多模型讨论 · {currentSession.multiModel.participants.length} 个参与者
+                  </p>
+                ) : currentModel && (
                   <p className="text-sm text-gray-500 dark:text-gray-400">
                     {currentModel.provider} / {currentModel.model}
                   </p>
@@ -491,13 +842,57 @@ export function ChatPage() {
                     工作区 / {workspaces.active.name}
                   </p>
                 )}
+                {currentSession.multiModel && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                    {currentSession.multiModel.participants.map((participant, index) => (
+                      <span
+                        key={multiModelParticipantId(participant)}
+                        className={cn(
+                          "rounded px-2 py-1",
+                          index % 2 === 0
+                            ? "bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300"
+                            : "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                        )}
+                      >
+                        {participant.name}
+                      </span>
+                    ))}
+                    {currentSession.waitingForUser && !isStreaming && (
+                      <span className="rounded bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                        等待你发言
+                      </span>
+                    )}
+                    {isStreaming ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-red-600 dark:text-red-400"
+                        onClick={() => multiModelAbortRef.current?.abort()}
+                      >
+                        <Square className="mr-1 h-3 w-3 fill-current" />
+                        停止
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2"
+                        onClick={() =>
+                          updateSession(currentSessionId, { multiModel: undefined })
+                        }
+                      >
+                        退出讨论模式
+                      </Button>
+                    )}
+                  </div>
+                )}
               </div>
-              {currentSession.messages.length > 0 && (() => {
+              {publicMessages.length > 0 && (() => {
                 const registry = getDefaultRegistry();
                 const modelEntry = currentModel ? registry.resolve(currentModel.model) : null;
                 const estimatedTokens = Math.max(
                   0,
-                  estimateMessagesTokens(toApiMessages(currentSession.messages))
+                  estimateMessagesTokens(toApiMessages(publicMessages))
                 );
 
                 // 上下文窗口只有 Anthropic 的 /v1/models 会给（max_input_tokens），
@@ -540,7 +935,7 @@ export function ChatPage() {
 
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-3xl mx-auto py-8">
-            {currentSession.messages.length === 0 ? (
+            {publicMessages.length === 0 ? (
               <div className="text-center py-12">
                 <div className="w-16 h-16 bg-blue-100 dark:bg-blue-900 rounded-full flex items-center justify-center mx-auto mb-4">
                   <Bot className="w-8 h-8 text-blue-600 dark:text-blue-400" />
@@ -552,7 +947,7 @@ export function ChatPage() {
               </div>
             ) : (
               <div className="space-y-6">
-                {currentSession.messages.map((message) => (
+                {publicMessages.map((message) => (
                   <div
                     key={message.id}
                     className={cn(
@@ -585,7 +980,13 @@ export function ChatPage() {
                           "inline-block text-left rounded-lg px-4 py-3",
                           message.role === "user"
                             ? "bg-blue-600 text-white"
-                            : "bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700"
+                            : "bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700",
+                          message.role === "assistant" &&
+                            message.participant &&
+                            `border-l-4 ${multiModelParticipantTone(message.participant.id).border}`,
+                          message.role === "assistant" &&
+                            message.participant &&
+                            multiModelParticipantTone(message.participant.id).bubble
                         )}
                       >
                         {message.images && message.images.length > 0 && (
@@ -600,6 +1001,16 @@ export function ChatPage() {
                             ))}
                           </div>
                         )}
+                        {message.role === "assistant" && message.participant && (
+                          <div
+                            className={cn(
+                              "mb-1.5 text-[11px] font-semibold",
+                              multiModelParticipantTone(message.participant.id).text
+                            )}
+                          >
+                            {message.participant.name}
+                          </div>
+                        )}
                         {/* 工具卡片放在正文之前：一轮里模型可能先调工具、
                             拿到结果再作答，而内容是一条拼接起来的字符串 ——
                             卡片排在前面读起来才是「查了这些，然后这是答案」 */}
@@ -611,8 +1022,8 @@ export function ChatPage() {
                           </div>
                         ) : null}
                         {message.role === "assistant" ? (
-                          <div className="prose dark:prose-invert prose-sm max-w-none">
-                            <ReactMarkdown>{message.content}</ReactMarkdown>
+                          <div className="max-w-none">
+                            <MarkdownMessage content={message.content} />
                             {message.isStreaming && (
                               <span className="inline-block w-2 h-4 bg-gray-400 dark:bg-gray-500 ml-1 animate-pulse" />
                             )}
@@ -620,6 +1031,17 @@ export function ChatPage() {
                         ) : (
                           message.content && <div className="whitespace-pre-wrap">{message.content}</div>
                         )}
+                        {message.role === "assistant" &&
+                          !message.isStreaming &&
+                          (message.nextParticipant || message.nextUser) && (
+                            <div className="mt-3 border-t border-gray-200 pt-2 text-[11px] text-gray-500 dark:border-gray-700 dark:text-gray-400">
+                              下一位：
+                              {message.nextUser
+                                ? "用户"
+                                : message.nextParticipant?.name}
+                              {message.nextReason ? ` · ${message.nextReason}` : ""}
+                            </div>
+                          )}
                       </div>
                     </div>
                   </div>
@@ -632,6 +1054,48 @@ export function ChatPage() {
 
         <div className="border-t border-gray-200 dark:border-gray-800 px-4 pt-3 pb-2">
           <div className="max-w-3xl mx-auto">
+            {currentSession.multiModel && !isStreaming && (
+              <div className="mb-2 flex items-center justify-end gap-2 text-xs text-gray-500 dark:text-gray-400">
+                <span>下一位发言者</span>
+                <div className="w-52">
+                  <Select
+                    value={currentSession.pendingNextParticipantId ?? "auto"}
+                    onChange={(value) =>
+                      updateSession(currentSessionId, {
+                        pendingNextParticipantId:
+                          value === "auto" ? undefined : value,
+                      })
+                    }
+                    options={[
+                      {
+                        value: "auto",
+                        label: currentSession.waitingForUser
+                          ? "自动（邀请者继续）"
+                          : "自动（AI 决定 / 顺序）",
+                      },
+                      ...currentSession.multiModel.participants.map(
+                        (participant) => ({
+                          value: participant.id,
+                          label: participant.name,
+                        })
+                      ),
+                    ]}
+                    aria-label="指定下一位发言者"
+                  />
+                </div>
+              </div>
+            )}
+            {currentSession.waitingForUser && !isStreaming && (
+              <div className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
+                <span className="font-medium">
+                  {currentSession.waitingForUser.requestedBy.name}
+                </span>
+                邀请你发言
+                {currentSession.waitingForUser.reason
+                  ? `：${currentSession.waitingForUser.reason}`
+                  : "。"}
+              </div>
+            )}
             {/* 待上传图片预览 */}
             {pendingImages.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-2">
@@ -678,6 +1142,7 @@ export function ChatPage() {
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
                 onPaste={async (e) => {
+                  if (currentSession.multiModel) return;
                   const items = e.clipboardData.items;
                   for (const item of items) {
                     if (item.type.startsWith("image/")) {
@@ -693,7 +1158,13 @@ export function ChatPage() {
                     }
                   }
                 }}
-                placeholder="输入消息，或直接粘贴图片…"
+                placeholder={
+                  currentSession.waitingForUser
+                    ? "回应 AI 的邀请…"
+                    : currentSession.multiModel
+                    ? "输入新话题，继续多模型讨论…"
+                    : "输入消息，或直接粘贴图片…"
+                }
                 rows={1}
                 className={cn(
                   "resize-none border-0 bg-transparent shadow-none",
@@ -721,7 +1192,7 @@ export function ChatPage() {
                   aria-label="添加图片"
                   className="text-gray-500 dark:text-gray-400"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={isStreaming}
+                  disabled={isStreaming || !!currentSession.multiModel}
                 >
                   <ImageIcon className="w-[18px] h-[18px]" />
                 </Button>
@@ -762,6 +1233,14 @@ export function ChatPage() {
             </div>
           </div>
         </div>
+        </div>
+
+        {currentSession.multiModel && (
+          <PrivateChatPanel
+            messages={privatePanelMessages}
+            participants={currentSession.multiModel.participants}
+          />
+        )}
       </div>
 
       {showSettings && (
@@ -774,6 +1253,25 @@ export function ChatPage() {
           isConfigured={isConfigured}
           enableTools={enableTools}
           onToggleTools={toggleTools}
+        />
+      )}
+
+      {showMultiModelSetup && (
+        <MultiModelSetup
+          config={config}
+          initial={currentSession.multiModel}
+          onClose={() => setShowMultiModelSetup(false)}
+          onStart={(multiModel, prompt) => {
+            setShowMultiModelSetup(false);
+            setInput("");
+            setPendingImages([]);
+            void runMultiModelDiscussion(
+              currentSessionId,
+              prompt,
+              multiModel,
+              currentSession.messages
+            );
+          }}
         />
       )}
     </div>
