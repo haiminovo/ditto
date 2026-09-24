@@ -63,7 +63,7 @@ const BASE: RulePack = {
         scope: "meta",
         fields: ["name", "kind", "format", "owner"],
       },
-      remediation: "在资产元数据里补齐 name / kind / format / owner。" + "MCP 调用 ditto_asset_update 的 patch 参数，控制台在资产详情页编辑。",
+      remediation: "在资产元数据里补齐 name / kind / format / owner。可通过 MCP 调用 ditto_asset_update 的 patch 参数编辑。",
     },
     {
       id: "base-unique-path",

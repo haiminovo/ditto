@@ -610,7 +610,7 @@ export async function handleChatRequest(request: ChatRequest): Promise<Response>
               );
             }
             writer.pushText(
-              `\n\n（已达到工具调用轮数上限 ${MAX_TOOL_ROUNDS}，我先停下来。可以把问题拆小一点再问，或直接到实施控制台查看。）`
+              `\n\n（已达到工具调用轮数上限 ${MAX_TOOL_ROUNDS}，我先停下来。可以把问题拆小一点再问。）`
             );
             break;
           }

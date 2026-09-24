@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import Link from "next/link";
 import { useApp } from "@/app/providers";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,7 +14,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
-  LayoutDashboard,
   MessageSquare,
   Plus,
   Settings,
@@ -469,15 +467,6 @@ export function ChatPage() {
 
           <div className="my-2 border-t border-gray-200 dark:border-gray-800" />
 
-          {/* 与控制台的「返回对话」对称：跨应用跳转放最后，用分割线隔开。
-              样式对齐 ghost/md 按钮（Button 没有 asChild，只能手写）。 */}
-          <Link
-            href="/impl"
-            className="inline-flex h-10 w-full items-center justify-start gap-2 rounded-md px-4 py-2 font-medium text-gray-700 transition-colors hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
-          >
-            <LayoutDashboard className="w-4 h-4" />
-            实施控制台
-          </Link>
         </div>
       </div>
 
@@ -851,7 +840,7 @@ function SettingsModal({
                 <div className="text-sm font-medium">启用实施平台工具</div>
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
                   允许模型在对话中查询项目、资产、规则与审计（只读，外加跑规则自检）。
-                  写操作与审批仍需到实施控制台执行。
+                  写操作与审批不在本对话界面开放。
                 </p>
                 <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
                   若你的网关不支持 <code className="font-mono">tools</code> 参数而报错，关掉它即可。

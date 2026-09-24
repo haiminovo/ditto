@@ -13,7 +13,7 @@ import path from "node:path";
 import { initWorkspace } from "../lib/core/store/workspace";
 import { BUILTIN_SEEDS } from "../lib/capabilities/builtin/general";
 import { createContext } from "../lib/core/ops/context";
-import { consoleActor } from "../lib/core/actors";
+import { localActor } from "../lib/core/actors";
 import {
   applyTemplate,
   createProject,
@@ -75,7 +75,7 @@ async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ditto-core-smoke-"));
   console.log(`临时工作区：${root}`);
 
-  const ctx = createContext(root, consoleActor("冒烟测试"));
+  const ctx = createContext(root, localActor("冒烟测试"));
 
   /* ---------------------------------------------------------------- */
   section("1. 工作区与能力包");

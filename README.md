@@ -4,11 +4,10 @@
 
 一个基于 MCP 的实施交付平台。AI 客户端（Claude Code / Cursor / Claude Desktop）通过 MCP
 端到端驱动「建项目 → 渲染资产 → 跑规则 → 整改 → 提交审批 → 放行 → 导出交付物」；
-人通过 Web 控制台看到同一份数据与同一套闸门。
 
 > 仓库里原有的多 Provider LLM 聊天客户端（`lib/sdk/` + `components/chat.tsx`）仍在 `/`
 > 提供服务。它**通过进程内 MCP 连到实施平台**，可以在对话里查询项目、资产、规则与审计，
-> 但调不动任何写操作 —— 闸门仍在控制台那边。见「聊天客户端」一节。
+> 但调不动任何写操作。见「聊天客户端」一节。
 
 ---
 
@@ -17,7 +16,7 @@
 ```bash
 npm install
 npm run workspace:init      # 初始化工作区，安装内置能力包
-npm run dev                 # 控制台：http://localhost:3000/impl
+npm run dev                 # 对话界面：http://localhost:3000
 ```
 
 接入 Claude Code：
@@ -111,7 +110,6 @@ lib/capabilities/  能力包加载与模板渲染
 lib/mcp/           MCP 服务端装配：工具 / 资源 / 提示词
 mcp/stdio.ts       stdio 入口
 app/api/mcp/       HTTP Streamable 入口
-app/(impl)/        控制台（Server Components + Server Actions）
 workspace/         运行时数据（gitignore）
 ```
 
@@ -121,12 +119,11 @@ workspace/         运行时数据（gitignore）
 
 ```
 lib/core/ops/*.ts                 ← 唯一实现（业务逻辑 + 审计）
-  ├─ app/(impl)/impl/actions.ts   ← Server Action 适配器（FormData 进）
   └─ lib/mcp/tools/*.ts           ← MCP 适配器（zod 进）
 ```
 
-控制台与 MCP **必须都只是薄壳**。各写一份逻辑的后果很具体：审计流水分叉，
-同一个动作在两个入口得出不同结论，闸门随之失去意义。
+入口层**必须只是薄壳**。各写一份逻辑的后果很具体：审计流水分叉，
+同一个动作在不同入口得出不同结论，闸门随之失去意义。
 
 ---
 
@@ -166,7 +163,7 @@ workspace/
 - `templates/` —— 模板文件，用 `{{变量}}` 占位
 - `rules/` —— 该平台自带的规则包（纯 JSON）
 
-刷新控制台即会出现在能力包列表中。项目挂载时，平台标识匹配的包会自动挂载。
+下一次读取能力包列表即可看到。项目挂载时，平台标识匹配的包会自动挂载。
 
 ---
 
@@ -262,8 +259,7 @@ OpenAI 兼容条目（保留 Key 与接口地址，名称标注「已并入自�
 
 **复用的是同一套工具定义**（`lib/mcp/server.ts` 装配的那 36 个），经
 `InMemoryTransport` 进程内连接，而不是在浏览器里再写一个 MCP 客户端
-（理由见 `app/(impl)/impl/actions.ts` 的文件头）。所以工具行为与审计
-不可能在第三条通道上漂移。
+（理由见 `lib/sdk/tools.ts` 的文件头）。所以工具行为与审计不会在不同通道间漂移。
 
 ### 白名单是显式的
 
@@ -272,8 +268,7 @@ OpenAI 兼容条目（保留 Key 与接口地址，名称标注「已并入自�
 不在表里的工具，模型既看不到、也调不动（`callTool` 里另有一层拦截，
 因为参数是模型给的，不能假设它只点名自己见过的工具）。
 
-审计里这些调用记成 `chat-ui（AI·对话）`，与控制台的人工操作、
-Claude Code 的 `mcp-stdio` 调用三向可分。
+审计里这些调用记成 `chat-ui（AI·对话）`，与 Claude Code 的 `mcp-stdio` 调用可分。
 
 ### 上下文裁剪会修工具配对
 

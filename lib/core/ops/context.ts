@@ -4,11 +4,10 @@
  * ★ 这是整个平台最重要的结构约定：
  *
  *   lib/core/ops/*.ts          ← 唯一实现（业务逻辑 + 审计发射）
- *     ├─ app/(impl)/impl/actions.ts   ← Server Action 适配器（FormData 进）
- *     └─ lib/mcp/tools/*.ts           ← MCP 适配器（zod 进）
+ *     └─ lib/mcp/tools/*.ts    ← MCP 适配器（zod 进）
  *
- * 控制台与 MCP 必须都只是薄壳。不这样做的后果很具体：两边各写一份逻辑，
- * 审计流水就会分叉，闸门在不同入口给出不同结论，质量保证随之失效。
+ * 入口层必须只是薄壳。不这样做的后果很具体：各写一份逻辑，审计流水就会分叉，
+ * 闸门在不同入口给出不同结论，质量保证随之失效。
  */
 
 import { SYSTEM_ACTOR } from "../actors";

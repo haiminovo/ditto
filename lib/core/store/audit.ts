@@ -158,7 +158,7 @@ export function verifyAudit(auditDir: string): AuditVerifyResult {
   return { ok: true, total: entries.length };
 }
 
-/** 过滤读取：用于 ditto_audit_list 与控制台审计页 */
+/** 过滤读取：用于 ditto_audit_list */
 export interface AuditQuery {
   projectId?: string;
   assetId?: string;

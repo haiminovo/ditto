@@ -2,7 +2,7 @@
  * Ditto 实施平台 - 核心领域类型
  *
  * 本文件是**纯类型与常量**，零 import：不引用 fs / React / Next / MCP。
- * 控制台、MCP 服务端、脚本三方共用同一套定义。
+ * MCP 服务端、脚本与聊天客户端共用同一套定义。
  */
 
 export const SCHEMA_VERSION = 1 as const;
@@ -109,11 +109,11 @@ export function isEditable(status: AssetStatus): boolean {
 
 export type ActorType = "human" | "ai" | "system";
 
-export type ActorVia = "console" | "mcp-stdio" | "mcp-http" | "chat" | "cli";
+export type ActorVia = "mcp-stdio" | "mcp-http" | "chat" | "cli";
 
 export interface Actor {
   type: ActorType;
-  /** 稳定标识，例如 "console:local" / "mcp:claude-code" / "system:seed" */
+  /** 稳定标识，例如 "local:user" / "mcp:claude-code" / "system:seed" */
   id: string;
   /** 展示名 */
   name: string;
@@ -130,7 +130,7 @@ export interface ProjectSettings {
   allowAiApproval: boolean;
   /**
    * 是否要求审批人与提交人不同。
-   * 默认 false —— 打开它，纯 MCP 工作流会死锁（没有人类在控制台）。
+   * 默认 false —— 打开它，纯 MCP 工作流会死锁（没有人工审批者）。
    */
   requireDistinctApprover: boolean;
   /** 覆盖规则包的阻断级别，默认 ["error"] */

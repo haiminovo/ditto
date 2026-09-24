@@ -21,7 +21,7 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { initWorkspace } from "../lib/core/store/workspace";
 import { BUILTIN_SEEDS } from "../lib/capabilities/builtin/general";
-import { mcpActor, consoleActor, describeActor } from "../lib/core/actors";
+import { mcpActor, localActor, describeActor } from "../lib/core/actors";
 import { createContext } from "../lib/core/ops/context";
 import { createProject } from "../lib/core/ops";
 import { createToolBridge, CHAT_TOOL_ALLOWLIST } from "../lib/sdk/tools";
@@ -191,9 +191,9 @@ async function main() {
     section("5. rule_run：白名单里唯一会落盘的工具");
 
     // 先拿领域层直接建一个项目。**故意不走桥接层** —— 建项目是写操作，
-    // 桥接层按设计不提供。这也正是本层要证明的：活还得人去控制台干。
+    // 桥接层按设计不提供。这也正是本层要证明的：写操作不能从对话界面绕过。
     const { project } = await createProject(
-      createContext(root, consoleActor("冒烟建项人")),
+      createContext(root, localActor("冒烟建项人")),
       {
         name: "对话工具冒烟项目",
         customer: "示例客户",
@@ -241,10 +241,10 @@ async function main() {
       `= ${describeActor(sample.actor)}`
     );
 
-    // 建项目的人是「控制台」，跑规则的是「对话」—— 两个来源在同一条
+    // 建项目的人是本地脚本，跑规则的是「对话」—— 两个来源在同一条
     // 流水里分得开，这正是 via 取值的意义
-    const consoleEntries = entries.filter((e) => e.actor.via === "console");
-    assert(consoleEntries.length > 0, "同一条流水里能看到控制台来源的操作");
+    const localEntries = entries.filter((e) => e.actor.via === "cli");
+    assert(localEntries.length > 0, "同一条流水里能看到本地来源的操作");
 
     /* ---------------------------------------------------------------- */
     section("7. 工具 item 走 SSE 协议往返");
@@ -435,7 +435,7 @@ async function main() {
 
   // 先建一个真项目，好让 handoff 有东西可查
   const { project: fakeProject } = await createProject(
-    createContext(root, consoleActor("冒烟建项人")),
+      createContext(root, localActor("冒烟建项人")),
     {
       name: "循环冒烟项目",
       customer: "示例客户",

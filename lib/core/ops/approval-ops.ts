@@ -55,7 +55,7 @@ export function assertCanApprove(input: ApprovalPolicyInput): void {
   if (actor.type === "ai" && !project.settings.allowAiApproval) {
     throw new CoreError(
       "E_APPROVAL_FORBIDDEN",
-      `项目「${project.name}」已关闭 AI 审批。请在控制台由人工放行，` +
+      `项目「${project.name}」已关闭 AI 审批。请由具备权限的人工操作者通过 MCP 客户端放行，` +
         `或用 ditto_project_update 把 settings.allowAiApproval 置为 true。`,
       { projectId: project.id, actor: actor.id }
     );

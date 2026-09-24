@@ -3,8 +3,7 @@
  *
  * 这个文件让对话里的模型能调用实施平台的工具，而**不新增第四个 ops 薄壳**：
  * 它连的是同一套 lib/mcp 服务端（createMcpServer），所以工具行为、审计发射
- * 与 stdio / HTTP 两个入口完全一致 —— 这正是 README「控制台与 MCP 都必须只是
- * 薄壳」那条结构规则要的东西。
+ * 与 stdio / HTTP 两个入口完全一致 —— 三个入口都只做适配，不另写业务逻辑。
  *
  * ⚠️ 本文件是**服务端专用**：它 import 了 lib/mcp/server.ts，而后者经
  *    lib/core/store/paths 依赖 node:fs。所以它**绝不能**出现在
@@ -151,7 +150,7 @@ export async function createToolBridge(
       // 不能假设它只会点名见过的工具
       if (!isAllowed(name)) {
         return {
-          text: `【E_TOOL_NOT_ALLOWED】工具 ${name} 不在对话界面可用的范围内。写操作与审批请到实施控制台（/impl）执行。`,
+          text: `【E_TOOL_NOT_ALLOWED】工具 ${name} 不在对话界面可用的范围内。写操作与审批请通过 MCP 客户端执行。`,
           isError: true,
         };
       }

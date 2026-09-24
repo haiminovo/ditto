@@ -2,7 +2,7 @@
  * Ditto 实施平台 - 错误分类
  *
  * 领域层只抛 CoreError。MCP 适配层把它翻译成工具错误，
- * 控制台适配层把它翻译成表单提示 —— 两边共用同一套 code。
+ * 各入口共用同一套 code，便于调用方按错误类型处理。
  */
 
 export type CoreErrorCode =
@@ -41,7 +41,7 @@ export class CoreError extends Error {
     this.details = details;
   }
 
-  /** 面向 AI 客户端与控制台的中文单行描述 */
+  /** 面向调用方的中文单行描述 */
   toDisplay(): string {
     return `[${this.code}] ${this.message}`;
   }

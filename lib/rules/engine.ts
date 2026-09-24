@@ -6,7 +6,7 @@
  *   - findings 排序确定、不含时间戳
  *   - inputHash 记录（规则包 + 资产 rev/hash）
  *
- * 这样 AI 客户端跑的 run 与控制台跑的 run 是**可证明一致**的。
+ * 这样不同 AI 客户端跑的 run 是**可证明一致**的。
  * 一旦两者能漂移，闸门就失去了权威 —— 存量 run 只是证据，不是权威。
  */
 
@@ -250,7 +250,7 @@ export function sortFindings(findings: Finding[]): Finding[] {
 
 /**
  * run 的输入指纹：规则包内容 + 被检查资产的 rev/hash。
- * 内容相同则指纹相同 —— 这是「控制台与 AI 跑出同一结果」的可验证依据。
+ * 内容相同则指纹相同 —— 这是不同客户端跑出同一结果的可验证依据。
  */
 export function computeInputHash(packs: RulePack[], assets: Asset[]): string {
   const payload = {

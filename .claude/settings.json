@@ -1,7 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx tsx *)"
+      "Bash(npx tsx *)",
+      "Bash(echo \"=== data tree ===\"; find /Users/haimin/Documents/projects/customer-resource/data -not -path '*/node_modules*' | head -80; echo; echo \"=== lib/service ===\"; ls -la /Users/haimin/Documents/projects/customer-resource/lib/service/)",
+      "Read(//Users/haimin/Documents/projects/customer-resource/data/**)",
+      "Read(//Users/haimin/Documents/projects/customer-resource/lib/service/**)",
+      "Bash(cd /Users/haimin/Documents/projects/customer-resource && cat doc/平台-审批通过通知.md && echo \"════════\" && cat doc/平台-确认收票通知.md && echo \"════ 轩竹-凭证生成需求（前 80 行）════\" && head -80 doc/轩竹生物/轩竹-凭证生成需求.md)",
+      "Read(//Users/haimin/Documents/projects/customer-resource/**)",
+      "Bash(cd /Users/haimin/Documents/projects/customer-resource/src && echo \"########## XINHUI event245filter vs GUANGZHOU ##########\"; diff guangzhoujifan/voucher_gen/topic_filter/event245filter.js xinhuijianshe/voucher_gen/topic_filter/event245filter.js; echo; echo \"########## XINHUI event398filter vs GUANGZHOU ##########\"; diff guangzhoujifan/voucher_gen/topic_filter/event398filter.js xinhuijianshe/voucher_gen/topic_filter/event398filter.js; echo; echo \"########## TEMP event245filter vs GUANGZHOU ##########\"; diff guangzhoujifan/voucher_gen/topic_filter/event245filter.js voucher_gen_temp/voucher_gen/topic_filter/event245filter.js; echo; echo \"########## TEMP event398filter vs GUANGZHOU ##########\"; diff guangzhoujifan/voucher_gen/topic_filter/event398filter.js voucher_gen_temp/voucher_gen/topic_filter/event398filter.js; echo; echo \"########## TEMP event427filter vs GUANGZHOU ##########\"; diff guangzhoujifan/voucher_gen/topic_filter/event427filter.js voucher_gen_temp/voucher_gen/topic_filter/event427filter.js)",
+      "Read(//Users/haimin/Documents/projects/customer-resource/src/**)",
+      "Bash(cd /Users/haimin/Documents/projects/customer-resource/src && echo \"===== guangzhoujifan event245filter.js =====\"; cat -n guangzhoujifan/voucher_gen/topic_filter/event245filter.js; echo; echo \"===== guangzhoujifan event398filter.js =====\"; cat -n guangzhoujifan/voucher_gen/topic_filter/event398filter.js; echo; echo \"===== guangzhoujifan event427filter.js =====\"; cat -n guangzhoujifan/voucher_gen/topic_filter/event427filter.js; echo; echo \"===== guangzhoujifan 例.js =====\"; cat -n guangzhoujifan/voucher_gen/topic_filter/例.js; echo; echo \"===== filter.md =====\"; cat -n guangzhoujifan/voucher_gen/topic_filter/filter.md)"
     ]
   }
 }

@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { useApp } from "@/app/providers";
 import {
   Card,
@@ -155,15 +154,6 @@ export function SetupPage() {
               <Button size="lg" onClick={() => setStep("provider")}>
                 开始设置
               </Button>
-              <p className="mt-4 text-sm text-gray-500 dark:text-gray-400">
-                实施控制台不依赖 Provider 配置，可{" "}
-                <Link
-                  href="/impl"
-                  className="text-blue-600 dark:text-blue-400 hover:underline"
-                >
-                  直接进入
-                </Link>
-              </p>
             </CardContent>
           </>
         )}

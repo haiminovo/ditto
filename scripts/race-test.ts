@@ -3,7 +3,7 @@
  *
  * 这是本平台**最值得写的一个测试**。
  *
- * 真实场景里，`next dev`（控制台 + HTTP MCP）与 Claude Code 拉起的 stdio MCP
+ * 真实场景里，`next dev`（HTTP MCP）与 Claude Code 拉起的 stdio MCP
  * 服务端会同时写同一个工作区。没有保护的话，`assets.json` 会被交错写入覆盖，
  * 丢资产是必然不是偶然。
  *
@@ -24,7 +24,7 @@ import { fileURLToPath } from "node:url";
 import { initWorkspace } from "../lib/core/store/workspace";
 import { BUILTIN_SEEDS } from "../lib/capabilities/builtin/general";
 import { createContext } from "../lib/core/ops/context";
-import { consoleActor } from "../lib/core/actors";
+import { localActor } from "../lib/core/actors";
 import { createAsset } from "../lib/core/ops/asset-ops";
 import { createProject } from "../lib/core/ops/project-ops";
 import { readAssets } from "../lib/core/store/assets";
@@ -39,7 +39,7 @@ const LOCAL = 50;
 
 /** 子进程模式：并发创建一批资产 */
 async function workerMode(root: string, projectId: string, tag: string): Promise<void> {
-  const ctx = createContext(root, consoleActor(`worker-${tag}`));
+  const ctx = createContext(root, localActor(`worker-${tag}`));
 
   const jobs = Array.from({ length: PER_WORKER }, (_, i) =>
     createAsset(ctx, projectId, {
@@ -79,7 +79,7 @@ async function main(): Promise<void> {
 
   initWorkspace(root, BUILTIN_SEEDS);
 
-  const ctx = createContext(root, consoleActor("主进程"));
+  const ctx = createContext(root, localActor("主进程"));
   const { project } = await createProject(ctx, {
     name: "并发测试项目",
     customer: "并发客户",

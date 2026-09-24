@@ -3,7 +3,7 @@
  *
  * 一套工具定义，两个入口：
  *   mcp/stdio.ts            → StdioServerTransport（本地 AI 客户端）
- *   app/api/mcp/route.ts    → WebStandardStreamableHTTPServerTransport（远程 / 控制台）
+ *   app/api/mcp/route.ts    → WebStandardStreamableHTTPServerTransport（远程）
  *
  * 两个入口共用本文件，所以工具行为不可能在两个通道间漂移。
  */

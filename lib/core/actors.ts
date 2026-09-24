@@ -17,17 +17,17 @@ export const SYSTEM_ACTOR: Actor = {
   via: "cli",
 };
 
-export const CONSOLE_ACTOR: Actor = {
+export const LOCAL_ACTOR: Actor = {
   type: "human",
-  id: "console:local",
+  id: "local:user",
   name: "本地用户",
-  via: "console",
+  via: "cli",
 };
 
-/** 控制台操作者：允许表单覆盖展示名 */
-export function consoleActor(name?: string): Actor {
+/** 本地操作者：允许脚本覆盖展示名 */
+export function localActor(name?: string): Actor {
   const trimmed = name?.trim();
-  return trimmed ? { ...CONSOLE_ACTOR, name: trimmed } : CONSOLE_ACTOR;
+  return trimmed ? { ...LOCAL_ACTOR, name: trimmed } : LOCAL_ACTOR;
 }
 
 /**
@@ -74,7 +74,6 @@ export function mcpActor(
  * 那个整串，但同样不该把 "mcp-stdio" / "chat" 这种内部取值直接摆给用户看。
  */
 export const VIA_LABELS: Record<ActorVia, string> = {
-  console: "控制台",
   "mcp-stdio": "MCP stdio",
   "mcp-http": "MCP HTTP",
   chat: "对话",
